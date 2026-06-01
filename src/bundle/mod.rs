@@ -35,7 +35,19 @@ pub fn html_for(cfg: &PolicyConfig, tool_name: &str) -> (String, Value) {
     // (postMessage doesn't need network), but don't grant any extra
     // origins. Hosts will fall back to the spec's default restrictive
     // CSP, which is what we want.
-    (AUTO_HTML.to_string(), json!({}))
+    let html = if cfg.preview_mode {
+        // Inject a marker the bundle's debug overlay reads to enable
+        // itself. We can't append a query string because hosts (Claude's
+        // sandbox proxy) re-host the HTML on their own origin.
+        AUTO_HTML.replacen(
+            "<head>",
+            "<head>\n<meta name=\"x-mcp-debug\" content=\"1\">",
+            1,
+        )
+    } else {
+        AUTO_HTML.to_string()
+    };
+    (html, json!({}))
 }
 
 fn custom_bundle_for_tool<'a>(

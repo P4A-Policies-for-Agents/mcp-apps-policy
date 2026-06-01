@@ -67,7 +67,17 @@ upload-docs: ## Upload definition/home.md as the Exchange home page
 .PHONY: build-asset-files
 build-asset-files: $(DEFINITION_SRC_GCL_PATH)
 	@anypoint-cli-v4 pdk policy-project build-asset-files --metadata '$(ANYPOINT_METADATA_JSON)'
-	@if [ -d definition/target/definition ]; then \
+	@# Some CLI versions emit into definition/target/, others into
+	@# definition/target/definition/. Mirror in both directions so downstream
+	@# `cargo anypoint gcl-gen` and `policy-project locate-gcl` both find
+	@# what they expect.
+	@mkdir -p definition/target/definition
+	@if [ -f definition/target/gcl.yaml ] && [ ! -f definition/target/definition/gcl.yaml ]; then \
+		cp definition/target/gcl.yaml      definition/target/definition/gcl.yaml      2>/dev/null || true; \
+		cp definition/target/metadata.yaml definition/target/definition/metadata.yaml 2>/dev/null || true; \
+		cp definition/target/exchange.json definition/target/definition/exchange.json 2>/dev/null || true; \
+		cp definition/target/schema.json   definition/target/definition/schema.json   2>/dev/null || true; \
+	elif [ -f definition/target/definition/gcl.yaml ]; then \
 		cp definition/target/definition/gcl.yaml      definition/target/gcl.yaml      2>/dev/null || true; \
 		cp definition/target/definition/metadata.yaml definition/target/metadata.yaml 2>/dev/null || true; \
 		cp definition/target/definition/exchange.json definition/target/exchange.json 2>/dev/null || true; \

@@ -1,0 +1,37 @@
+{
+  "appifyTools": true,
+  "appifyResponses": true,
+  "appifyActions": true,
+
+  "renderer": "auto",
+
+  "tools": [
+    {
+      "name": "get_accounts",
+      "renderer": "table",
+      "actions": [
+        {
+          "tool": "update_accounts",
+          "label": "Edit",
+          "argsTemplate": "{\"accounts\":[{\"Id\":\"${Id}\"}]}"
+        },
+        {
+          "tool": "delete_accounts",
+          "label": "Delete",
+          "argsTemplate": "{\"Ids\":[\"${Id}\"]}"
+        }
+      ]
+    },
+    { "name": "create_Accounts", "renderer": "form" },
+    { "name": "update_accounts", "renderer": "form" },
+    { "name": "delete_accounts", "renderer": "card" }
+  ],
+
+  "defaultActions": [],
+  "denyTools": [],
+  "customBundles": [],
+
+  "previewMode": true,
+  "debugHeaders": true,
+  "maxBodyBytes": 1048576
+}

@@ -9,7 +9,7 @@ use std::collections::{HashMap, HashSet};
 use serde::{Deserialize, Serialize};
 
 use crate::generated::config::{
-    Actions0Config, Config, CustomBundleCspConfig, CustomBundles0Config, Tools0Config,
+    Actions0Config, Config, Csp1Config, CustomBundles0Config, DefaultActions0Config, Tools0Config,
 };
 
 #[derive(Debug, thiserror::Error)]
@@ -329,7 +329,7 @@ fn parse_action(rule: &str, raw: &Actions0Config) -> Result<Action, ConfigError>
     })
 }
 
-fn parse_default_action(raw: &Actions0Config) -> Result<Action, ConfigError> {
+fn parse_default_action(raw: &DefaultActions0Config) -> Result<Action, ConfigError> {
     let tool = raw.tool.trim().to_string();
     if tool.is_empty() {
         return Err(ConfigError::DefaultAction(
@@ -395,7 +395,7 @@ fn parse_custom_bundle(raw: &CustomBundles0Config) -> Result<CustomBundle, Confi
     Ok(CustomBundle { name, html, csp })
 }
 
-fn parse_csp(raw: &CustomBundleCspConfig) -> CustomBundleCsp {
+fn parse_csp(raw: &Csp1Config) -> CustomBundleCsp {
     fn collect(v: &Option<Vec<String>>) -> Vec<String> {
         v.as_deref()
             .unwrap_or(&[])

@@ -41,6 +41,12 @@ struct RequestState {
     /// Path captured at request time so the response phase has it for
     /// debug headers.
     path: String,
+    /// For a `tools/call` request, the tool name from `params.name`.
+    /// JSON-RPC responses don't carry the method name and most upstream
+    /// MCP servers don't add `_meta.toolName`, so we capture it here so
+    /// the response phase can inject `_meta.ui.actions` for the right
+    /// tool.
+    tool_name: Option<String>,
 }
 
 #[entrypoint]
@@ -96,7 +102,10 @@ async fn request_filter(
         .unwrap_or_else(|| path_with_qs.clone());
 
     if !request.contains_body() {
-        return Flow::Continue(RequestState { path: path_only });
+        return Flow::Continue(RequestState {
+            path: path_only,
+            tool_name: None,
+        });
     }
 
     // Read the body to peek at the JSON-RPC envelope. If it's a
@@ -107,10 +116,15 @@ async fn request_filter(
 
     if body.len() > cfg.max_body_bytes {
         // Don't try to parse oversized bodies; just let them through.
-        return Flow::Continue(RequestState { path: path_only });
+        return Flow::Continue(RequestState {
+            path: path_only,
+            tool_name: None,
+        });
     }
 
     let parsed: Option<Value> = serde_json::from_slice(&body).ok();
+
+    let tool_name = parsed.as_ref().and_then(extract_tool_call_name);
 
     if let Some(intercept) = parsed.as_ref().and_then(|v| match_resources_read(v)) {
         if let Some(tool_name) = mcp::parse_ui_uri(&intercept.uri) {
@@ -150,7 +164,25 @@ async fn request_filter(
         }
     }
 
-    Flow::Continue(RequestState { path: path_only })
+    Flow::Continue(RequestState {
+        path: path_only,
+        tool_name,
+    })
+}
+
+/// If the parsed body is a JSON-RPC `tools/call`, return the tool name.
+fn extract_tool_call_name(v: &Value) -> Option<String> {
+    let map = v.as_object()?;
+    if map.get("jsonrpc").and_then(|x| x.as_str()) != Some("2.0") {
+        return None;
+    }
+    if map.get("method").and_then(|x| x.as_str()) != Some("tools/call") {
+        return None;
+    }
+    map.get("params")
+        .and_then(|p| p.get("name"))
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())
 }
 
 /// What `match_resources_read` returns when the request is a hit.
@@ -243,7 +275,7 @@ fn transform_json_body(
             return None;
         }
     };
-    let action = mcp::rewrite_response(cfg, &mut parsed);
+    let action = mcp::rewrite_response(cfg, &mut parsed, state.tool_name.as_deref());
     if action == mcp::Action_::Untouched {
         return None;
     }
@@ -267,7 +299,8 @@ fn transform_sse_body(
     for event in &events {
         let next = match sse::data_as_json(event) {
             Some(mut parsed) => {
-                let action = mcp::rewrite_response(cfg, &mut parsed);
+                let action =
+                    mcp::rewrite_response(cfg, &mut parsed, state.tool_name.as_deref());
                 if action != mcp::Action_::Untouched {
                     transformed_any = true;
                     log_action(state, action);

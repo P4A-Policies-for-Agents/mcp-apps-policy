@@ -63,7 +63,50 @@
   var resourceUri = null;
   var toolName = null;
 
+  // -------------------- debug overlay --------------------
+  // Gated on `?debug=1` in the iframe URL. Renders a fixed-position
+  // log of every postMessage in/out plus current state. Lets us see the
+  // SEP-1865 handshake from inside the iframe in hosts (Claude.ai's
+  // sandbox proxy) where opening a JS console on the iframe is awkward.
+  var DEBUG = (function () {
+    try {
+      if (/[?&]debug=1\b/.test(location.search)) return true;
+      var m = document.querySelector('meta[name="x-mcp-debug"]');
+      return !!(m && m.getAttribute("content") === "1");
+    } catch (_) { return false; }
+  })();
+  var debugLogEl = null;
+  function debugInit() {
+    if (!DEBUG || debugLogEl) return;
+    debugLogEl = document.createElement("pre");
+    debugLogEl.id = "mcp-debug-overlay";
+    debugLogEl.style.cssText = [
+      "position:fixed", "left:0", "right:0", "bottom:0",
+      "max-height:50vh", "margin:0", "padding:8px 10px",
+      "font:11px ui-monospace,SFMono-Regular,Menlo,Consolas,monospace",
+      "background:rgba(0,0,0,0.85)", "color:#9ef79e",
+      "white-space:pre-wrap", "word-break:break-word",
+      "overflow:auto", "z-index:2147483647",
+      "border-top:1px solid #444"
+    ].join(";");
+    debugLogEl.textContent = "[debug] overlay attached\n";
+    var attach = function () { document.body.appendChild(debugLogEl); };
+    if (document.body) attach();
+    else document.addEventListener("DOMContentLoaded", attach);
+  }
+  function dbg(direction, msg) {
+    if (!DEBUG) return;
+    debugInit();
+    if (!debugLogEl) return;
+    var line = "[" + new Date().toISOString().slice(11, 23) + "] " + direction + " ";
+    try { line += JSON.stringify(msg); } catch (_) { line += String(msg); }
+    debugLogEl.textContent += line + "\n";
+    debugLogEl.scrollTop = debugLogEl.scrollHeight;
+  }
+  debugInit();
+
   function send(msg) {
+    dbg("OUT", msg);
     window.parent.postMessage(msg, "*");
   }
 
@@ -82,6 +125,7 @@
 
   window.addEventListener("message", function (event) {
     var msg = event.data;
+    dbg("IN", msg);
     if (!msg || typeof msg !== "object") return;
     if (msg.jsonrpc !== "2.0") return;
     if (typeof msg.id !== "undefined" && (msg.result || msg.error)) {
@@ -131,19 +175,26 @@
   }
 
   // -------------------- handshake --------------------
+  // `appCapabilities` lists capabilities the *View* implements. The
+  // SEP-1865 spec only defines a small set here (chiefly `displayModes`);
+  // earlier versions of this bundle sent `{tools:{listChanged:false}}`,
+  // which is not a valid View capability and may cause strict hosts to
+  // silently drop subsequent `ui/notifications/tool-result` pushes.
   call("ui/initialize", {
     protocolVersion: "2026-01-26",
     appCapabilities: {
-      tools: { listChanged: false },
-      availableDisplayModes: ["inline", "fullscreen"]
+      displayModes: ["inline", "fullscreen"]
     },
-    clientInfo: { name: "mcp-apps-policy/auto", version: "0.1.0" }
+    appInfo: { name: "mcp-apps-policy/auto", version: "0.1.0" }
   }).then(function (result) {
     hostContext = result && result.hostContext ? result.hostContext : {};
     if (hostContext && hostContext.toolInfo && hostContext.toolInfo.tool) {
       toolName = hostContext.toolInfo.tool.name || null;
     }
     applyTheme();
+    // Per SEP-1865, the host gates `tool-input` / `tool-result` pushes on
+    // having received `initialized` from the View. Send it before any
+    // render so the bridge can flush queued notifications.
     notify("ui/notifications/initialized");
     render();
     emitSize();
@@ -154,15 +205,27 @@
   });
 
   // -------------------- size reporting --------------------
+  // Some hosts (e.g. Claude.ai's wrapper) keep the iframe container
+  // hidden (`visibility: hidden`, `height: 0`) until the View reports a
+  // positive size. Emit early — before the first tool result arrives —
+  // so the placeholder is visible while we wait, and re-emit on every
+  // render so the host can grow/shrink the row.
   function emitSize() {
     try {
-      var w = document.documentElement.scrollWidth;
-      var h = document.body.scrollHeight;
+      var w = document.documentElement.scrollWidth || document.body.scrollWidth || 1;
+      var h = document.body.scrollHeight || document.documentElement.scrollHeight || 1;
       notify("ui/notifications/size-changed", { width: w, height: h });
     } catch (_) { /* best-effort */ }
   }
   if (typeof ResizeObserver !== "undefined") {
     new ResizeObserver(emitSize).observe(document.body);
+  }
+  // Fire once as soon as the DOM is laid out, in case the host's reveal
+  // gate triggers before `ui/initialize` resolves.
+  if (document.readyState === "loading") {
+    document.addEventListener("DOMContentLoaded", emitSize);
+  } else {
+    requestAnimationFrame(emitSize);
   }
 
   // -------------------- rendering --------------------
@@ -184,6 +247,15 @@
       if (content && content.type === "text" && typeof content.text === "string") {
         try { data = JSON.parse(content.text); }
         catch (e) { data = content.text; }
+      }
+    }
+    // The policy wraps top-level arrays under `{items: [...]}` so the
+    // result is a valid MCP `structuredContent` object. Unwrap that
+    // shape on the renderer side so the table view still kicks in.
+    if (data && typeof data === "object" && !Array.isArray(data)) {
+      var keys = Object.keys(data);
+      if (keys.length === 1 && keys[0] === "items" && Array.isArray(data.items)) {
+        data = data.items;
       }
     }
 

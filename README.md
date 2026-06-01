@@ -122,7 +122,7 @@ The policy only modifies *responses* (and the synthesised
 | `defaultActions[]` | array | `[]` | Actions appended to every tool's button row when `appifyActions` is on. |
 | `denyTools[]` | array | `[]` | Tool names that must never be appified, advertised, or targeted by an action. Takes precedence over everything else. |
 | `customBundles[]` | array | `[]` | Inline HTML bundles served for specific tools (per-tool `renderer: <name>`). |
-| `previewMode` | bool | `false` | Adds `x-mcp-apps-preview` response header with a compact JSON describing what changed. |
+| `previewMode` | bool | `false` | Adds an `x-mcp-apps-preview` response header with a compact JSON describing what changed, and injects a `<meta name="x-mcp-debug">` marker into the embedded bundle so the in-iframe debug overlay activates (logs every postMessage on a fixed-position panel). Off in production. |
 | `debugHeaders` | bool | `false` | Adds `x-mcp-apps-method`, `x-mcp-apps-tool`, `x-mcp-apps-action`, `x-mcp-apps-renderer` response headers. |
 | `maxBodyBytes` | int | `1048576` | Bodies above this size pass through. Min 1 KiB, max 50 MiB. |
 
@@ -293,10 +293,20 @@ anypoint-cli-v4 api-mgr policy apply <API_INSTANCE_ID> mcp-apps-policy \
   --groupId <GROUP_ID> \
   --environment Sandbox \
   --upstreamId <UPSTREAM_ID> \
-  --configFile policy-config.json
+  --configFile policy-config.<server>.json
 ```
 
-`policy-config.json` in the repo is a fully-worked sample.
+Each MCP server gets its own config file because the `tools[]`
+overrides only apply to tools that actually exist on that upstream —
+mixing them produces phantom resources. The repo includes two
+fully-worked samples:
+
+- `policy-config.crm.json` — CRM tools (`get_accounts`,
+  `create_Accounts`, `update_accounts`, `delete_accounts`).
+- `policy-config.erp.json` — ERP tools (`get_inventory`,
+  `submit_order`, `submit_delivery`).
+
+Adapt one per upstream and pass the right file with `--configFile`.
 
 ### Verify
 
@@ -372,6 +382,7 @@ during rollout.
 | --- | --- | --- |
 | Tools come back without `_meta.ui` | Upstream is not MCP / response is not JSON-RPC, or `appifyTools: false`, or every tool is on the `denyTools` list | Confirm the upstream is MCP and `appifyTools` is on; check `denyTools`. |
 | Iframe never renders | Host doesn't speak MCP Apps yet | Try a host that does (Claude.ai, VS Code Copilot, Goose, MCPJam). The wire format is still correct — non-supporting hosts just ignore `_meta.ui`. |
+| Iframe loads but stays empty / "Waiting for tool result…" | Host gates `tool-result` pushes on a successful `ui/initialize`, or on a non-zero `size-changed` report. Turn on `previewMode: true` to enable the in-iframe debug overlay (`<meta name="x-mcp-debug">`); it logs every postMessage and surfaces handshake errors. |
 | Action button arguments are empty | `argsTemplate` references a `${field}` not present in `structuredContent` | Inspect the tool's `result.structuredContent` and align the template. |
 | `resources/read` for a `ui://` URI hits the upstream | Policy load order / wrong policy ref | Check `anypoint-cli-v4 api-mgr policy list` shows `mcp-apps-policy` applied. |
 | `Cannot process message because this session hasn't been initialized yet` | Upstream uses Streamable HTTP and requires an `initialize` handshake first | Issue an MCP `initialize`, capture the `mcp-session-id` response header, send it on subsequent calls. |
@@ -399,7 +410,8 @@ tests/
   it_resources_read.rs         # ui:// short-circuit tests
   it_sse.rs                    # Streamable HTTP / SSE tests
   common/                      # shared backend harness
-policy-config.json             # full sample config
+policy-config.crm.json         # sample config for the CRM upstream
+policy-config.erp.json         # sample config for the ERP upstream
 ROADMAP.md                     # what's next
 ```
 

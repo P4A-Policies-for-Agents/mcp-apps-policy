@@ -1,0 +1,44 @@
+{
+  "appifyTools": true,
+  "appifyResponses": true,
+  "appifyActions": true,
+
+  "renderer": "auto",
+
+  "tools": [
+    {
+      "name": "get_inventory",
+      "renderer": "card",
+      "actions": [
+        {
+          "tool": "submit_order",
+          "label": "Order this material",
+          "argsTemplate": "{\"MATERIAL\":\"${productId}\",\"TARGET_QTY\":\"1\"}"
+        }
+      ]
+    },
+    {
+      "name": "submit_order",
+      "renderer": "card",
+      "actions": [
+        {
+          "tool": "submit_delivery",
+          "label": "Create delivery",
+          "argsTemplate": "{\"ORDER_NO\":\"${ORDER_NO}\"}"
+        }
+      ]
+    },
+    {
+      "name": "submit_delivery",
+      "renderer": "card"
+    }
+  ],
+
+  "defaultActions": [],
+  "denyTools": [],
+  "customBundles": [],
+
+  "previewMode": true,
+  "debugHeaders": true,
+  "maxBodyBytes": 1048576
+}

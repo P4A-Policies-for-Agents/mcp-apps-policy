@@ -51,6 +51,35 @@ bundle so the policy works without external hosting.
   `-renderer`).
 - **Integration test harness on `pdk-unit`** covering `tools/list`,
   `tools/call`, `resources/read`, and SSE shapes.
+- **Request-side tool-name capture (0.1.1).** `on_request` parses the
+  `tools/call` body and stashes `params.name` in `RequestState`; the
+  response phase reads it so action injection works against upstreams
+  that don't echo `_meta.toolName` (which is most of them).
+- **`structuredContent` array wrap (0.1.4).** The MCP spec requires
+  `structuredContent` to be a JSON object. When the upstream's
+  `content[0].text` parses to an array (e.g. CRM `get_accounts`),
+  the policy now wraps it under `{"items": [...]}` so the response
+  is spec-valid; the embedded bundle unwraps that shape on render so
+  the table view still kicks in.
+- **In-iframe debug overlay (0.1.5–0.1.6).** When `previewMode: true`,
+  `bundle::html_for` injects `<meta name="x-mcp-debug" content="1">`
+  into the served HTML and the bundle attaches a fixed-position log
+  of every postMessage in/out plus current state. Lets us diagnose
+  the SEP-1865 handshake from inside hosts whose iframe console is
+  awkward to open (e.g. Claude.ai's sandbox proxy).
+- **SEP-1865 handshake correctness (0.1.6–0.1.8).** The `ui/initialize`
+  payload now sends `displayModes: ["inline", "fullscreen"]` (replacing
+  an invalid `tools.listChanged` capability) and uses the spec-correct
+  `appInfo` field name (was `clientInfo`, which strict hosts rejected
+  with `params.appInfo: invalid_type`). Early `size-changed` reports
+  fire on DOMContentLoaded / first RAF so hosts that gate iframe
+  visibility on a non-zero size reveal the bundle even before the first
+  tool result arrives.
+- **Per-server configs.** The repo ships `policy-config.crm.json` and
+  `policy-config.erp.json` so each upstream gets only its own tools in
+  `tools[]`. A single shared config caused phantom `ui://` resources
+  to leak across servers (CRM tools showing up on the ERP MCP and
+  vice versa); per-upstream files keep the resource list scoped.
 
 **Known gaps**
 

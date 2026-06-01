@@ -60,7 +60,17 @@ impl Action_ {
 /// Inspect a JSON-RPC response and apply the configured transforms.
 /// Returns `(maybe_new_value, action)`. When `action == Untouched` the
 /// caller can keep the original frame to avoid re-serialising.
-pub fn rewrite_response(cfg: &PolicyConfig, body: &mut Value) -> Action_ {
+///
+/// `request_tool_name` is the tool name pulled from the originating
+/// `tools/call` request (`params.name`), if any. JSON-RPC responses
+/// don't carry the method name and most upstream MCP servers don't
+/// emit `_meta.toolName`, so this is how the response phase learns
+/// which tool produced the result.
+pub fn rewrite_response(
+    cfg: &PolicyConfig,
+    body: &mut Value,
+    request_tool_name: Option<&str>,
+) -> Action_ {
     let Some(map) = body.as_object_mut() else {
         return Action_::Untouched;
     };
@@ -91,7 +101,7 @@ pub fn rewrite_response(cfg: &PolicyConfig, body: &mut Value) -> Action_ {
     }
 
     if is_tool_call_result(result) {
-        return apply_to_tool_call_result(result, cfg);
+        return apply_to_tool_call_result(result, cfg, request_tool_name);
     }
 
     Action_::Untouched
@@ -179,22 +189,28 @@ fn append_ui_resources(resources: &mut Vec<Value>, cfg: &PolicyConfig) {
 }
 
 /// Apply transforms to a `tools/call` `result` object.
-fn apply_to_tool_call_result(result: &mut Value, cfg: &PolicyConfig) -> Action_ {
+fn apply_to_tool_call_result(
+    result: &mut Value,
+    cfg: &PolicyConfig,
+    request_tool_name: Option<&str>,
+) -> Action_ {
     let normalised = if cfg.appify_responses {
         ensure_structured_content(result)
     } else {
         false
     };
 
-    // Inject actions if a tool name is identifiable. Per the MCP Apps
-    // spec, tool names aren't carried in the `tools/call` *result*. The
-    // upstream MAY put it under `_meta.toolName` (some servers do); if
-    // not, we fall back to the policy's `defaultActions` only.
-    let tool_name = result
-        .get("_meta")
-        .and_then(|m| m.get("toolName"))
-        .and_then(|v| v.as_str())
-        .map(String::from);
+    // Prefer the tool name captured from the originating `tools/call`
+    // request — JSON-RPC responses don't carry the method name and most
+    // upstream MCP servers don't emit `_meta.toolName`. Fall back to
+    // `result._meta.toolName` for the rare server that does.
+    let tool_name = request_tool_name.map(String::from).or_else(|| {
+        result
+            .get("_meta")
+            .and_then(|m| m.get("toolName"))
+            .and_then(|v| v.as_str())
+            .map(String::from)
+    });
     let actions = match tool_name.as_deref() {
         Some(name) => cfg.actions_for(name),
         None => {
@@ -284,12 +300,20 @@ fn ensure_structured_content(result: &mut Value) -> bool {
         Ok(v) => v,
         Err(_) => return false,
     };
-    // Only object/array payloads are useful as structuredContent.
-    // Strings/numbers stay in `content` only.
-    if !parsed.is_object() && !parsed.is_array() {
+    // Per the MCP spec, `structuredContent` MUST be a JSON object —
+    // arrays, strings, and primitives are not valid there. Wrap a raw
+    // top-level array under a stable `items` key so list-returning
+    // tools (e.g. `get_accounts`) still get a usable
+    // `structuredContent` object instead of being rejected by the
+    // host's validator.
+    let wrapped = if parsed.is_object() {
+        parsed
+    } else if parsed.is_array() {
+        json!({ "items": parsed })
+    } else {
         return false;
-    }
-    map.insert("structuredContent".to_string(), parsed);
+    };
+    map.insert("structuredContent".to_string(), wrapped);
     true
 }
 
@@ -465,7 +489,7 @@ mod tests {
     fn rewrite_passthrough_for_non_jsonrpc() {
         let cfg = cfg_default();
         let mut body = json!({"hello": "world"});
-        assert_eq!(rewrite_response(&cfg, &mut body), Action_::Untouched);
+        assert_eq!(rewrite_response(&cfg, &mut body, None), Action_::Untouched);
         assert_eq!(body, json!({"hello": "world"}));
     }
 
@@ -483,7 +507,7 @@ mod tests {
             }
         });
         assert_eq!(
-            rewrite_response(&cfg, &mut body),
+            rewrite_response(&cfg, &mut body, None),
             Action_::AnnotatedToolsList
         );
         let tools = body["result"]["tools"].as_array().unwrap();
@@ -514,7 +538,7 @@ mod tests {
                 ]
             }
         });
-        rewrite_response(&cfg, &mut body);
+        rewrite_response(&cfg, &mut body, None);
         let tools = body["result"]["tools"].as_array().unwrap();
         assert!(tools[0].get("_meta").is_none());
         assert!(tools[1]["_meta"]["ui"]["resourceUri"].is_string());
@@ -532,13 +556,37 @@ mod tests {
                 ]
             }
         });
-        let action = rewrite_response(&cfg, &mut body);
+        let action = rewrite_response(&cfg, &mut body, None);
         assert!(matches!(
             action,
             Action_::NormalisedToolResult | Action_::NormalisedAndInjected
         ));
         assert_eq!(body["result"]["structuredContent"]["sku"], "A1");
         assert_eq!(body["result"]["structuredContent"]["qty"], 5);
+    }
+
+    #[test]
+    fn wraps_top_level_arrays_under_items() {
+        // MCP `structuredContent` MUST be an object. A tool whose
+        // text content is a JSON array (e.g. CRM `get_accounts`) gets
+        // wrapped under `{items: [...]}` so hosts don't reject it.
+        let cfg = cfg_default();
+        let mut body = json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "result": {
+                "content": [
+                    {"type": "text", "text": "[{\"Id\":\"a\"},{\"Id\":\"b\"}]"}
+                ]
+            }
+        });
+        rewrite_response(&cfg, &mut body, None);
+        assert!(body["result"]["structuredContent"].is_object());
+        let items = body["result"]["structuredContent"]["items"]
+            .as_array()
+            .expect("items array");
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[0]["Id"], "a");
     }
 
     #[test]
@@ -552,7 +600,7 @@ mod tests {
                 "structuredContent": {"prebuilt": true}
             }
         });
-        rewrite_response(&cfg, &mut body);
+        rewrite_response(&cfg, &mut body, None);
         assert_eq!(body["result"]["structuredContent"], json!({"prebuilt": true}));
     }
 
@@ -580,7 +628,42 @@ mod tests {
                 "_meta": {"toolName": "get_inventory"}
             }
         });
-        let action = rewrite_response(&cfg, &mut body);
+        let action = rewrite_response(&cfg, &mut body, None);
+        assert!(matches!(action, Action_::NormalisedAndInjected));
+        let actions = body["result"]["_meta"]["ui"]["actions"]
+            .as_array()
+            .unwrap();
+        assert_eq!(actions[0]["tool"], "create_order");
+        assert_eq!(actions[0]["arguments"], json!({"sku": "A1"}));
+    }
+
+    #[test]
+    fn injects_actions_using_request_tool_name() {
+        // Real upstreams don't emit `_meta.toolName`; the request side
+        // captures `params.name` and passes it down. Confirm that
+        // pathway works on a result with no `_meta` at all.
+        let cfg = PolicyConfig::from_raw(&RawConfig {
+            tools: Some(vec![crate::generated::config::Tools0Config {
+                name: "get_inventory".into(),
+                renderer: None,
+                appify: None,
+                actions: Some(vec![crate::generated::config::Actions0Config {
+                    tool: "create_order".into(),
+                    label: "Order".into(),
+                    args_template: Some("{\"sku\":\"${sku}\"}".into()),
+                }]),
+            }]),
+            ..raw_empty()
+        })
+        .unwrap();
+        let mut body = json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "result": {
+                "content": [{"type": "text", "text": "{\"sku\":\"A1\"}"}]
+            }
+        });
+        let action = rewrite_response(&cfg, &mut body, Some("get_inventory"));
         assert!(matches!(action, Action_::NormalisedAndInjected));
         let actions = body["result"]["_meta"]["ui"]["actions"]
             .as_array()
@@ -606,7 +689,7 @@ mod tests {
             "id": 1,
             "result": {"resources": []}
         });
-        let action = rewrite_response(&cfg, &mut body);
+        let action = rewrite_response(&cfg, &mut body, None);
         assert_eq!(action, Action_::AppendedUiResources);
         let resources = body["result"]["resources"].as_array().unwrap();
         assert_eq!(resources.len(), 1);
@@ -637,7 +720,7 @@ mod tests {
             "id": 1,
             "result": {"resources": [{"uri": "ui://upstream/their-app"}]}
         });
-        let _ = rewrite_response(&cfg, &mut body);
+        let _ = rewrite_response(&cfg, &mut body, None);
         // Upstream-served ui:// must not be displaced.
         let resources = body["result"]["resources"].as_array().unwrap();
         assert_eq!(resources.len(), 1);
