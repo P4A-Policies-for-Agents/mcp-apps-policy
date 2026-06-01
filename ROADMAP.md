@@ -80,6 +80,17 @@ bundle so the policy works without external hosting.
   `tools[]`. A single shared config caused phantom `ui://` resources
   to leak across servers (CRM tools showing up on the ERP MCP and
   vice versa); per-upstream files keep the resource list scoped.
+- **Versioned `ui://` URIs (0.1.9).** Synthesised URIs now include the
+  policy version: `ui://mcp-apps-policy/v<version>/<tool>`. Claude.ai's
+  `*.claudemcpcontent.com` sandbox proxy caches the bundle bytes by
+  URI and otherwise pins the first bundle it ever fetches — when we
+  shipped the corrected `appInfo` handshake in 0.1.8 it kept serving
+  the v0.1.6 bundle for existing conversations, which the host then
+  rejected with `params.appInfo: invalid_type`. Each release now bumps
+  the URI segment so the cache misses and the new bundle is fetched.
+  The legacy unversioned shape (`ui://mcp-apps-policy/<tool>`) is
+  still accepted on the read path so cached references from older
+  releases keep resolving.
 
 **Known gaps**
 

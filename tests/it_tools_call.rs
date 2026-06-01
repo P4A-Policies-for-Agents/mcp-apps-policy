@@ -85,9 +85,15 @@ fn injects_action_buttons_when_tool_name_is_known() {
     assert_eq!(actions[0]["tool"], "create_order");
     assert_eq!(actions[0]["label"], "Order");
     assert_eq!(actions[0]["arguments"]["sku"], "A1");
+    let uri = body["result"]["_meta"]["ui"]["resourceUri"]
+        .as_str()
+        .unwrap();
     assert_eq!(
-        body["result"]["_meta"]["ui"]["resourceUri"],
-        "ui://mcp-apps-policy/get_inventory"
+        uri,
+        format!(
+            "ui://mcp-apps-policy/v{}/get_inventory",
+            env!("CARGO_PKG_VERSION")
+        )
     );
 }
 

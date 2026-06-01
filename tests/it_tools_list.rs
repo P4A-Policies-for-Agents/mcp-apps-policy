@@ -46,13 +46,14 @@ fn each_tool_gets_a_ui_resource_uri() {
     let body = parse_json(resp.body());
     let tools = body["result"]["tools"].as_array().expect("tools array");
     assert_eq!(tools.len(), 2);
+    let prefix = format!("ui://mcp-apps-policy/v{}/", env!("CARGO_PKG_VERSION"));
     assert_eq!(
         tools[0]["_meta"]["ui"]["resourceUri"].as_str().unwrap(),
-        "ui://mcp-apps-policy/get_inventory"
+        format!("{prefix}get_inventory")
     );
     assert_eq!(
         tools[1]["_meta"]["ui"]["resourceUri"].as_str().unwrap(),
-        "ui://mcp-apps-policy/list_customers"
+        format!("{prefix}list_customers")
     );
     assert_eq!(tools[0]["name"], "get_inventory");
     assert_eq!(tools[0]["description"], "Look up stock");

@@ -33,6 +33,13 @@ pub mod sse;
 /// characters illegal in a URI authority/path are URL-encoded.
 pub const UI_AUTHORITY: &str = "mcp-apps-policy";
 
+/// Version segment baked into every minted `ui://` URI. Hosts (notably
+/// Claude.ai's `*.claudemcpcontent.com` sandbox proxy) cache the
+/// bundle keyed by URI; when we ship a new bundle we want the URI to
+/// change so the cache misses. Tying the segment to `CARGO_PKG_VERSION`
+/// gets that for free on every release.
+pub const POLICY_VERSION: &str = env!("CARGO_PKG_VERSION");
+
 /// What the policy decided to do with one JSON-RPC frame.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Action_ {
@@ -393,17 +400,46 @@ fn value_to_string(v: &Value) -> String {
     }
 }
 
-/// Build the canonical `ui://mcp-apps-policy/<toolName>` URI.
+/// Build the canonical `ui://mcp-apps-policy/v<version>/<toolName>` URI.
+/// The version segment is baked in so the URI changes on every policy
+/// release — that bust hosts (notably Claude.ai's sandbox proxy) which
+/// cache the bundle bytes by URI.
 pub fn synthesize_ui_uri(tool_name: &str) -> String {
-    format!("ui://{}/{}", UI_AUTHORITY, encode_segment(tool_name))
+    format!(
+        "ui://{}/v{}/{}",
+        UI_AUTHORITY,
+        POLICY_VERSION,
+        encode_segment(tool_name)
+    )
 }
 
-/// Inverse of `synthesize_ui_uri`. Returns `None` if the URI was not
-/// minted by this policy.
+/// Inverse of `synthesize_ui_uri`. Recognises both the current
+/// versioned shape (`ui://mcp-apps-policy/v<version>/<tool>`) and the
+/// pre-0.1.9 unversioned shape (`ui://mcp-apps-policy/<tool>`) so
+/// stale `_meta.ui.resourceUri` references — e.g. ones cached by a
+/// host between releases — still resolve to the correct tool.
+/// Returns `None` if the URI was not minted by this policy.
 pub fn parse_ui_uri(uri: &str) -> Option<String> {
     let prefix = format!("ui://{}/", UI_AUTHORITY);
     let rest = uri.strip_prefix(&prefix)?;
-    Some(decode_segment(rest))
+    let segment = match rest.split_once('/') {
+        Some((first, tool)) if is_version_segment(first) => tool,
+        _ => rest,
+    };
+    Some(decode_segment(segment))
+}
+
+/// Recognises a `v<digits>...` version segment without pulling in a
+/// regex dep. Anything else (including a tool whose name happens to
+/// start with `v`) falls through to the legacy single-segment path.
+fn is_version_segment(seg: &str) -> bool {
+    let Some(rest) = seg.strip_prefix('v') else {
+        return false;
+    };
+    rest.chars()
+        .next()
+        .map(|c| c.is_ascii_digit())
+        .unwrap_or(false)
 }
 
 fn encode_segment(s: &str) -> String {
@@ -481,8 +517,33 @@ mod tests {
     #[test]
     fn ui_uri_roundtrips() {
         let uri = synthesize_ui_uri("get inventory!");
-        assert!(uri.starts_with("ui://mcp-apps-policy/"));
+        // Versioned shape — `ui://mcp-apps-policy/v<version>/<tool>`.
+        assert!(uri.starts_with(&format!(
+            "ui://mcp-apps-policy/v{}/",
+            env!("CARGO_PKG_VERSION")
+        )));
         assert_eq!(parse_ui_uri(&uri).as_deref(), Some("get inventory!"));
+    }
+
+    #[test]
+    fn ui_uri_parser_accepts_legacy_unversioned_shape() {
+        // Pre-0.1.9 hosts that cached `ui://mcp-apps-policy/<tool>`
+        // before we added the version segment must still resolve to the
+        // right tool.
+        assert_eq!(
+            parse_ui_uri("ui://mcp-apps-policy/get_inventory").as_deref(),
+            Some("get_inventory")
+        );
+    }
+
+    #[test]
+    fn ui_uri_parser_handles_tool_starting_with_v() {
+        // A tool literally named `vault` (no digit after `v`) must not
+        // be misread as a version segment.
+        assert_eq!(
+            parse_ui_uri("ui://mcp-apps-policy/vault").as_deref(),
+            Some("vault")
+        );
     }
 
     #[test]
@@ -513,11 +574,11 @@ mod tests {
         let tools = body["result"]["tools"].as_array().unwrap();
         assert_eq!(
             tools[0]["_meta"]["ui"]["resourceUri"].as_str().unwrap(),
-            "ui://mcp-apps-policy/get_inventory"
+            synthesize_ui_uri("get_inventory")
         );
         assert_eq!(
             tools[1]["_meta"]["ui"]["resourceUri"].as_str().unwrap(),
-            "ui://mcp-apps-policy/list_customers"
+            synthesize_ui_uri("list_customers")
         );
     }
 
@@ -695,7 +756,7 @@ mod tests {
         assert_eq!(resources.len(), 1);
         assert_eq!(
             resources[0]["uri"].as_str().unwrap(),
-            "ui://mcp-apps-policy/get_inventory"
+            synthesize_ui_uri("get_inventory")
         );
         assert_eq!(
             resources[0]["mimeType"].as_str().unwrap(),

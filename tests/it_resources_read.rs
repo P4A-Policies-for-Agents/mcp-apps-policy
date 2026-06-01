@@ -12,10 +12,59 @@ use pdk_unit::{UnitHttpMessage, UnitHttpRequest, UnitTestBuilder};
 use serde_json::json;
 
 #[test]
-fn ui_uri_is_served_locally_with_html_bundle() {
+fn versioned_ui_uri_is_served_locally_with_html_bundle() {
     let (backend, handle) = ConfigurableBackend::new();
-    // Set the upstream to something easy to detect, in case the policy
-    // accidentally forwards the request.
+    handle.set_json(&json!({"jsonrpc": "2.0", "id": 1, "result": {"contents": []}}));
+
+    let mut tester = UnitTestBuilder::default()
+        .with_config("{}".to_string())
+        .with_backend(backend)
+        .with_entrypoint(configure);
+
+    let uri = format!(
+        "ui://mcp-apps-policy/v{}/get_inventory",
+        env!("CARGO_PKG_VERSION")
+    );
+    let req_body = json!({
+        "jsonrpc": "2.0",
+        "id": 99,
+        "method": "resources/read",
+        "params": {"uri": uri}
+    });
+    let req = UnitHttpRequest::post()
+        .with_path("/mcp")
+        .with_header("content-type", "application/json")
+        .with_body(req_body.to_string().into_bytes());
+    let resp = tester.request(req);
+
+    assert_eq!(resp.status_code(), 200);
+    assert!(!handle.was_called(), "upstream must not be called for ui:// URIs");
+
+    let body = parse_json(resp.body());
+    assert_eq!(body["jsonrpc"], "2.0");
+    assert_eq!(body["id"], 99);
+    let contents = body["result"]["contents"].as_array().unwrap();
+    assert_eq!(contents.len(), 1);
+    assert!(contents[0]["uri"]
+        .as_str()
+        .unwrap()
+        .starts_with("ui://mcp-apps-policy/v"));
+    assert_eq!(
+        contents[0]["mimeType"].as_str().unwrap(),
+        "text/html;profile=mcp-app"
+    );
+    let text = contents[0]["text"].as_str().unwrap();
+    assert!(text.starts_with("<!DOCTYPE html>"));
+    assert!(text.contains("ui/initialize"));
+    assert!(text.contains("ui/notifications/tool-result"));
+}
+
+#[test]
+fn legacy_unversioned_ui_uri_still_resolves() {
+    // Hosts that cached `_meta.ui.resourceUri` from a pre-0.1.9
+    // response will keep sending the unversioned URI for a while. The
+    // policy must still serve the bundle for those.
+    let (backend, handle) = ConfigurableBackend::new();
     handle.set_json(&json!({"jsonrpc": "2.0", "id": 1, "result": {"contents": []}}));
 
     let mut tester = UnitTestBuilder::default()
@@ -36,25 +85,15 @@ fn ui_uri_is_served_locally_with_html_bundle() {
     let resp = tester.request(req);
 
     assert_eq!(resp.status_code(), 200);
-    assert!(!handle.was_called(), "upstream must not be called for ui:// URIs");
-
+    assert!(!handle.was_called());
     let body = parse_json(resp.body());
-    assert_eq!(body["jsonrpc"], "2.0");
-    assert_eq!(body["id"], 99);
     let contents = body["result"]["contents"].as_array().unwrap();
     assert_eq!(contents.len(), 1);
     assert_eq!(
         contents[0]["uri"].as_str().unwrap(),
-        "ui://mcp-apps-policy/get_inventory"
+        "ui://mcp-apps-policy/get_inventory",
+        "legacy URI must echo back unchanged"
     );
-    assert_eq!(
-        contents[0]["mimeType"].as_str().unwrap(),
-        "text/html;profile=mcp-app"
-    );
-    let text = contents[0]["text"].as_str().unwrap();
-    assert!(text.starts_with("<!DOCTYPE html>"));
-    assert!(text.contains("ui/initialize"));
-    assert!(text.contains("ui/notifications/tool-result"));
 }
 
 #[test]

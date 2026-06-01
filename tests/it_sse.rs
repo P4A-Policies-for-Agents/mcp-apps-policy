@@ -48,7 +48,10 @@ fn sse_tools_list_frame_is_annotated_inline() {
     let parsed: serde_json::Value = serde_json::from_str(data_line).expect("data is JSON");
     assert_eq!(
         parsed["result"]["tools"][0]["_meta"]["ui"]["resourceUri"],
-        "ui://mcp-apps-policy/get_inventory"
+        format!(
+            "ui://mcp-apps-policy/v{}/get_inventory",
+            env!("CARGO_PKG_VERSION")
+        )
     );
 }
 

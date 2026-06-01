@@ -156,13 +156,24 @@ The policy only modifies *responses* (and the synthesised
 Every appified tool gets a synthesised URI of the form
 
 ```
-ui://mcp-apps-policy/<encoded-tool-name>
+ui://mcp-apps-policy/v<version>/<encoded-tool-name>
 ```
 
 Tool names are URL-percent-encoded so unusual characters round-trip
 cleanly. The authority `mcp-apps-policy` is fixed — it lets the
 policy recognise its own URIs in `resources/read` without consulting
 config.
+
+The `v<version>` segment is baked in from the policy's Cargo version
+so the URI changes with every release. Hosts that cache the bundle
+bytes by URI (notably Claude.ai's `*.claudemcpcontent.com` sandbox
+proxy, which is keyed by content hash and otherwise pins the first
+bundle it ever fetches) will miss on the new path and refetch the
+fresh bundle.
+
+Pre-0.1.9 unversioned URIs (`ui://mcp-apps-policy/<tool>`) are still
+recognised on the read path so any cached `_meta.ui.resourceUri`
+references from older releases keep working through the transition.
 
 ---
 
@@ -258,11 +269,13 @@ curl -s http://localhost:8081/mcp \
   -H 'Content-Type: application/json' \
   -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}' | jq
 
-# resources/read on a synthesised ui:// URI — answered locally
+# resources/read on a synthesised ui:// URI — answered locally.
+# Use whatever URI was advertised in the previous tools/list response;
+# the path includes the policy version (e.g. `v0.1.9`).
 curl -s http://localhost:8081/mcp \
   -H 'Content-Type: application/json' \
   -d '{"jsonrpc":"2.0","id":2,"method":"resources/read",
-       "params":{"uri":"ui://mcp-apps-policy/get_inventory"}}' | jq
+       "params":{"uri":"ui://mcp-apps-policy/v0.1.9/get_inventory"}}' | jq
 ```
 
 ---
@@ -383,6 +396,7 @@ during rollout.
 | Tools come back without `_meta.ui` | Upstream is not MCP / response is not JSON-RPC, or `appifyTools: false`, or every tool is on the `denyTools` list | Confirm the upstream is MCP and `appifyTools` is on; check `denyTools`. |
 | Iframe never renders | Host doesn't speak MCP Apps yet | Try a host that does (Claude.ai, VS Code Copilot, Goose, MCPJam). The wire format is still correct — non-supporting hosts just ignore `_meta.ui`. |
 | Iframe loads but stays empty / "Waiting for tool result…" | Host gates `tool-result` pushes on a successful `ui/initialize`, or on a non-zero `size-changed` report. Turn on `previewMode: true` to enable the in-iframe debug overlay (`<meta name="x-mcp-debug">`); it logs every postMessage and surfaces handshake errors. |
+| Iframe renders an *old* bundle / `ui/initialize` is rejected with a field name (e.g. `appInfo`) the current source no longer uses | Host's sandbox proxy cached the previous bundle by URI. Bump the policy version — the `v<version>` segment in `ui://mcp-apps-policy/v<version>/<tool>` will change and the proxy will refetch. |
 | Action button arguments are empty | `argsTemplate` references a `${field}` not present in `structuredContent` | Inspect the tool's `result.structuredContent` and align the template. |
 | `resources/read` for a `ui://` URI hits the upstream | Policy load order / wrong policy ref | Check `anypoint-cli-v4 api-mgr policy list` shows `mcp-apps-policy` applied. |
 | `Cannot process message because this session hasn't been initialized yet` | Upstream uses Streamable HTTP and requires an `initialize` handshake first | Issue an MCP `initialize`, capture the `mcp-session-id` response header, send it on subsequent calls. |
