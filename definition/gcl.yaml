@@ -1,0 +1,306 @@
+---
+apiVersion: gateway.mulesoft.com/v1alpha1
+kind: Extension
+metadata:
+  labels:
+    title: MCP Apps Policy
+    description: |
+      Turns any MCP server fronted by Omni Gateway into an MCP Apps host
+      surface. The policy injects the MCP Apps extension metadata
+      (`io.modelcontextprotocol/ui`, SEP-1865) into discovery and tool
+      results so MCP-Apps-aware hosts (Claude Desktop, Claude.ai,
+      VS Code Copilot, Goose, Postman, MCPJam, Archestra, ...) render
+      tools as interactive iframe apps.
+
+      What it does, on the wire, with no upstream changes:
+
+      - `tools/list` results: each tool gets `_meta.ui.resourceUri =
+        "ui://mcp-apps-policy/<toolName>"` so the host knows it can be
+        rendered as an app.
+      - `resources/list` results: a `ui://` entry is added per tool.
+      - `resources/read` for any `ui://mcp-apps-policy/...` URI: the
+        policy short-circuits and returns an embedded HTML bundle (a
+        small vanilla-JS app that handshakes via postMessage, listens
+        for `ui/notifications/tool-result`, auto-renders by shape, and
+        offers buttons for next-step tool calls).
+      - `tools/call` results: ensures the result has a clean
+        `structuredContent` for the UI (parsing `content[0].text` if it
+        carries JSON). Optionally injects suggested next-tool actions
+        the embedded UI renders as buttons that call other tools via
+        `tools/call` proxied by the host.
+
+      Three independently configurable transforms:
+
+      - `appifyTools`     — (a) advertise tools as apps in `tools/list`
+                                and `resources/list`.
+      - `appifyResponses` — (b) shape `tools/call` results for the UI.
+      - `appifyActions`   — (c) inject suggested next-tool actions.
+
+      The policy only engages on JSON-RPC 2.0 traffic (MCP). Plain REST
+      and other content passes through untouched. Hosts that do not
+      support the MCP Apps extension simply ignore the `_meta.ui` field
+      and behave exactly as before.
+
+      MCP Apps is an extension layered on the core MCP specification.
+      See https://modelcontextprotocol.io/extensions/apps/overview and
+      https://github.com/modelcontextprotocol/ext-apps for the protocol.
+    category: AI
+    metadata/interfaceScope: api,resource
+    metadata/capabilities/injectionPoint: outbound
+spec:
+  extends:
+    - name: extension-definition
+      namespace: default
+  properties:
+    # ------------------------------------------------------------------
+    # Master switches
+    # ------------------------------------------------------------------
+    appifyTools:
+      type: boolean
+      default: true
+      description: |
+        (a) When true, the policy walks `tools/list` results and adds
+        `_meta.ui = { resourceUri: "ui://mcp-apps-policy/<toolName>" }`
+        to each tool. The same tool also appears as a `ui://` entry in
+        `resources/list` so MCP-Apps-aware hosts know to fetch the UI.
+
+        Hosts that don't support the extension ignore the metadata —
+        nothing breaks. Set to `false` to disable app advertisement
+        without disabling response shaping.
+    appifyResponses:
+      type: boolean
+      default: true
+      description: |
+        (b) When true, the policy normalises `tools/call` results so
+        they're ready for the UI: if `result.structuredContent` is
+        missing and `result.content[0]` is a text block whose body
+        parses as JSON, the parsed value is copied into
+        `structuredContent`. Per the MCP Apps spec, `structuredContent`
+        is what the iframe consumes; `content` continues to feed the
+        model context. Existing `structuredContent` is preserved.
+    appifyActions:
+      type: boolean
+      default: true
+      description: |
+        (c) When true, the policy injects suggested next-tool actions
+        into `tools/call` results based on the matching `tools[]` /
+        `defaultActions` entries. The embedded UI renders these as
+        buttons. On click, the iframe issues `tools/call` for the
+        chosen tool through the host (the host opens the target tool's
+        UI in turn — full app-to-app navigation, no upstream changes).
+
+    # ------------------------------------------------------------------
+    # Bundle / renderer selection
+    # ------------------------------------------------------------------
+    renderer:
+      type: string
+      enum:
+        - auto
+        - json
+        - table
+        - card
+        - form
+      default: auto
+      description: |
+        Default renderer used by the embedded HTML bundle when no
+        per-tool override is configured.
+        - `auto`  : inspect the tool's outputSchema (if any) and the
+                    live tool result; pick table for arrays, card for
+                    flat objects, form for objects with editable
+                    fields, JSON viewer otherwise.
+        - `json`  : pretty-printed read-only JSON viewer.
+        - `table` : flat table for arrays of homogeneous objects.
+        - `card`  : key/value card for objects.
+        - `form`  : editable form (no submit by default; use `actions`
+                    to wire a submit button to a tool).
+
+    # ------------------------------------------------------------------
+    # Per-tool overrides
+    # ------------------------------------------------------------------
+    tools:
+      type: array
+      default: []
+      description: |
+        Per-tool overrides. Each entry sets the renderer and/or the
+        suggested next-tool actions for one tool name. Tools not listed
+        here use the default renderer and `defaultActions`.
+      items:
+        type: object
+        required:
+          - name
+        properties:
+          name:
+            type: string
+            description: |
+              Tool name as advertised by the MCP server (matched
+              case-sensitively against `result.tools[].name`).
+          renderer:
+            type: string
+            default: ""
+            description: |
+              Override the default renderer for this tool. Same enum
+              values as `renderer`. Empty = use the policy default.
+          appify:
+            type: boolean
+            default: true
+            description: |
+              Set to false to exclude this tool from app advertisement
+              (it will not get `_meta.ui` and will not appear in
+              `resources/list`). Useful for internal admin tools.
+          actions:
+            type: array
+            default: []
+            description: |
+              Suggested next-tool actions. Each action becomes a button
+              in the embedded UI. Clicking the button calls the named
+              tool via `tools/call` (proxied by the host).
+            items:
+              type: object
+              required:
+                - tool
+                - label
+              properties:
+                tool:
+                  type: string
+                  description: |
+                    Name of the tool to call when the button is
+                    clicked. The host fetches its UI and opens it
+                    inline.
+                label:
+                  type: string
+                  description: Button label.
+                argsTemplate:
+                  type: string
+                  default: ""
+                  description: |
+                    Optional JSON template applied to the current
+                    result before issuing the next call. `${field}`
+                    placeholders inside string values are replaced
+                    with values from the current result's
+                    `structuredContent`. Example:
+                    `{"sku": "${sku}"}`.
+
+    # ------------------------------------------------------------------
+    # Default actions (apply to every tool)
+    # ------------------------------------------------------------------
+    defaultActions:
+      type: array
+      default: []
+      description: |
+        Actions appended to every tool's button row when
+        `appifyActions: true`. Useful for global "go back" / "open
+        catalog" navigation. Same shape as per-tool actions.
+      items:
+        type: object
+        required:
+          - tool
+          - label
+        properties:
+          tool:
+            type: string
+          label:
+            type: string
+          argsTemplate:
+            type: string
+            default: ""
+
+    # ------------------------------------------------------------------
+    # Deny list
+    # ------------------------------------------------------------------
+    denyTools:
+      type: array
+      default: []
+      description: |
+        Tool names that must never be appified, never advertised as a
+        UI resource, and never targeted by an injected action. Takes
+        precedence over `appifyTools` and per-tool overrides. Use for
+        internal admin tools you don't want exposed to the rendering
+        layer.
+      items:
+        type: string
+
+    # ------------------------------------------------------------------
+    # Bundle authoring (advanced)
+    # ------------------------------------------------------------------
+    customBundles:
+      type: array
+      default: []
+      description: |
+        Inline HTML bundles served verbatim for specific tools.
+        Overrides the policy's built-in renderer entirely. The HTML
+        must implement the MCP Apps postMessage protocol; see
+        https://apps.extensions.modelcontextprotocol.io/api/.
+      items:
+        type: object
+        required:
+          - name
+          - html
+        properties:
+          name:
+            type: string
+            description: |
+              Bundle identifier. A tool overrides its renderer with
+              `renderer: <name>` to use the bundle.
+          html:
+            type: string
+            description: |
+              Full HTML5 document, served as
+              `text/html;profile=mcp-app`. JavaScript must be inlined
+              or whitelisted via `csp.resourceDomains`.
+          csp:
+            type: object
+            default: {}
+            description: |
+              Optional CSP overrides emitted as `_meta.ui.csp`. Same
+              shape as the spec: `connectDomains`, `resourceDomains`,
+              `frameDomains`, `baseUriDomains`.
+            properties:
+              connectDomains:
+                type: array
+                default: []
+                items:
+                  type: string
+              resourceDomains:
+                type: array
+                default: []
+                items:
+                  type: string
+              frameDomains:
+                type: array
+                default: []
+                items:
+                  type: string
+              baseUriDomains:
+                type: array
+                default: []
+                items:
+                  type: string
+
+    # ------------------------------------------------------------------
+    # Diagnostics
+    # ------------------------------------------------------------------
+    previewMode:
+      type: boolean
+      default: false
+      description: |
+        When true, the policy adds an `x-mcp-apps-preview` response
+        header containing a compact JSON `{action, tool}` describing
+        what the policy did to this response. The body itself is
+        unchanged in shape. Off in production.
+    debugHeaders:
+      type: boolean
+      default: false
+      description: |
+        When true, the policy adds `x-mcp-apps-method`,
+        `x-mcp-apps-tool`, `x-mcp-apps-action`, and
+        `x-mcp-apps-renderer` response headers describing how each
+        message was processed.
+    maxBodyBytes:
+      type: integer
+      minimum: 1024
+      maximum: 52428800
+      default: 1048576
+      description: |
+        Cap on the response body size the policy will parse and
+        transform. Bodies larger than this are passed through
+        unchanged (with a `warn` log). Default 1 MiB; max 50 MiB.

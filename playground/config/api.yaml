@@ -1,0 +1,41 @@
+# Copyright 2026 Salesforce, Inc. All rights reserved.
+---
+apiVersion: gateway.mulesoft.com/v1alpha1
+kind: ApiInstance
+metadata:
+  name: ingress-http
+spec:
+  address: http://0.0.0.0:8081
+  services:
+    upstream:
+      # Point this at your MCP server. The default httpbin upstream is
+      # only useful as a smoke-test target — it does not speak MCP, so
+      # the policy will pass requests through unchanged. For a real run,
+      # set `address:` to one of:
+      #   http://<host>/<crm-or-erp-mcp-path>
+      address: http://backend:80
+      routes:
+        - config:
+            destinationPath: /
+  policies:
+    - policyRef:
+        name: mcp-apps-policy-impl # overridden by `make run`
+        namespace: default
+      config:
+        appifyTools: true
+        appifyResponses: true
+        appifyActions: true
+        renderer: auto
+        tools:
+          - name: get_inventory
+            renderer: card
+            actions:
+              - tool: create_order
+                label: Order
+                argsTemplate: '{"sku":"${sku}"}'
+        defaultActions: []
+        denyTools: []
+        customBundles: []
+        previewMode: false
+        debugHeaders: false
+        maxBodyBytes: 1048576

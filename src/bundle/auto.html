@@ -1,0 +1,377 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>MCP App</title>
+<style>
+  :root {
+    color-scheme: light dark;
+    --bg: var(--color-background-primary, #ffffff);
+    --fg: var(--color-text-primary, #1a1a1a);
+    --muted: var(--color-text-secondary, #6a6a6a);
+    --accent: var(--color-accent, #2563eb);
+    --border: var(--color-border-primary, rgba(0,0,0,0.08));
+    --row: var(--color-background-secondary, rgba(0,0,0,0.02));
+    --radius: var(--border-radius-md, 8px);
+    --shadow: var(--shadow-sm, 0 1px 2px rgba(0,0,0,0.04));
+    --font: var(--font-sans, -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif);
+  }
+  html, body { margin: 0; padding: 0; background: var(--bg); color: var(--fg); font-family: var(--font); }
+  body { padding: 12px 16px 20px 16px; }
+  .header { display: flex; align-items: baseline; justify-content: space-between; margin-bottom: 12px; }
+  .title { font-size: 14px; font-weight: 600; }
+  .subtitle { font-size: 12px; color: var(--muted); }
+  .empty { color: var(--muted); font-style: italic; padding: 24px 0; text-align: center; }
+  table { border-collapse: collapse; width: 100%; font-size: 13px; }
+  th, td { text-align: left; padding: 6px 10px; border-bottom: 1px solid var(--border); vertical-align: top; }
+  th { font-weight: 600; color: var(--muted); background: var(--row); position: sticky; top: 0; }
+  tr:hover td { background: var(--row); }
+  .card { padding: 12px 14px; border: 1px solid var(--border); border-radius: var(--radius); box-shadow: var(--shadow); margin-bottom: 8px; }
+  .kv { display: grid; grid-template-columns: max-content 1fr; gap: 6px 14px; font-size: 13px; }
+  .kv .k { color: var(--muted); white-space: nowrap; }
+  .kv .v { word-break: break-word; }
+  pre.json { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12px; padding: 10px 12px; background: var(--row); border-radius: var(--radius); white-space: pre-wrap; word-break: break-word; max-height: 60vh; overflow: auto; }
+  .actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 16px; padding-top: 12px; border-top: 1px solid var(--border); }
+  button { font: inherit; font-size: 13px; padding: 6px 12px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--bg); color: var(--fg); cursor: pointer; }
+  button:hover { background: var(--row); }
+  button.primary { background: var(--accent); color: #fff; border-color: var(--accent); }
+  button.primary:hover { filter: brightness(1.1); }
+  button:disabled { opacity: 0.5; cursor: wait; }
+  .alert { padding: 10px 12px; border-radius: var(--radius); border: 1px solid #f5c6cb; background: #fbe9eb; color: #842029; font-size: 13px; }
+  @media (prefers-color-scheme: dark) {
+    .alert { background: #3b1f23; color: #f8b4ba; border-color: #5a2a30; }
+  }
+</style>
+</head>
+<body>
+<div id="root"><div class="empty">Waiting for tool result&hellip;</div></div>
+<script>
+(function () {
+  // -------------------- postMessage protocol shim --------------------
+  // Implements the View side of the MCP Apps protocol
+  // (io.modelcontextprotocol/ui, SEP-1865). All we need:
+  //  - send `ui/initialize`, then `ui/notifications/initialized`
+  //  - listen for `ui/notifications/tool-result` (and tool-input)
+  //  - send `tools/call` requests when the user clicks an action
+  // See: https://github.com/modelcontextprotocol/ext-apps/blob/main/specification/2026-01-26/apps.mdx
+  var nextId = 1;
+  var pending = new Map();
+  var hostContext = null;
+  var lastResult = null;
+  var renderer = "auto";
+  var resourceUri = null;
+  var toolName = null;
+
+  function send(msg) {
+    window.parent.postMessage(msg, "*");
+  }
+
+  function call(method, params) {
+    var id = nextId++;
+    var msg = { jsonrpc: "2.0", id: id, method: method, params: params || {} };
+    return new Promise(function (resolve, reject) {
+      pending.set(id, { resolve: resolve, reject: reject });
+      send(msg);
+    });
+  }
+
+  function notify(method, params) {
+    send({ jsonrpc: "2.0", method: method, params: params || {} });
+  }
+
+  window.addEventListener("message", function (event) {
+    var msg = event.data;
+    if (!msg || typeof msg !== "object") return;
+    if (msg.jsonrpc !== "2.0") return;
+    if (typeof msg.id !== "undefined" && (msg.result || msg.error)) {
+      // Response to one of our requests.
+      var p = pending.get(msg.id);
+      if (!p) return;
+      pending.delete(msg.id);
+      if (msg.error) p.reject(msg.error); else p.resolve(msg.result);
+      return;
+    }
+    if (typeof msg.method === "string") {
+      handleNotification(msg);
+    }
+  });
+
+  function handleNotification(msg) {
+    switch (msg.method) {
+      case "ui/notifications/tool-result":
+        lastResult = msg.params;
+        render();
+        emitSize();
+        break;
+      case "ui/notifications/tool-input":
+      case "ui/notifications/tool-input-partial":
+        // We don't need the input for the auto-renderer; ignore.
+        break;
+      case "ui/notifications/host-context-changed":
+        if (hostContext && msg.params && typeof msg.params === "object") {
+          for (var k in msg.params) hostContext[k] = msg.params[k];
+          applyTheme();
+          render();
+        }
+        break;
+    }
+  }
+
+  function applyTheme() {
+    if (!hostContext || !hostContext.styles || !hostContext.styles.variables) return;
+    var vars = hostContext.styles.variables;
+    var root = document.documentElement.style;
+    for (var k in vars) root.setProperty(k, vars[k]);
+    if (hostContext.styles.css && hostContext.styles.css.fonts) {
+      var s = document.createElement("style");
+      s.textContent = hostContext.styles.css.fonts;
+      document.head.appendChild(s);
+    }
+  }
+
+  // -------------------- handshake --------------------
+  call("ui/initialize", {
+    protocolVersion: "2026-01-26",
+    appCapabilities: {
+      tools: { listChanged: false },
+      availableDisplayModes: ["inline", "fullscreen"]
+    },
+    clientInfo: { name: "mcp-apps-policy/auto", version: "0.1.0" }
+  }).then(function (result) {
+    hostContext = result && result.hostContext ? result.hostContext : {};
+    if (hostContext && hostContext.toolInfo && hostContext.toolInfo.tool) {
+      toolName = hostContext.toolInfo.tool.name || null;
+    }
+    applyTheme();
+    notify("ui/notifications/initialized");
+    render();
+    emitSize();
+  }).catch(function () {
+    // The host did not respond. Render whatever we have anyway.
+    render();
+    emitSize();
+  });
+
+  // -------------------- size reporting --------------------
+  function emitSize() {
+    try {
+      var w = document.documentElement.scrollWidth;
+      var h = document.body.scrollHeight;
+      notify("ui/notifications/size-changed", { width: w, height: h });
+    } catch (_) { /* best-effort */ }
+  }
+  if (typeof ResizeObserver !== "undefined") {
+    new ResizeObserver(emitSize).observe(document.body);
+  }
+
+  // -------------------- rendering --------------------
+  function render() {
+    var root = document.getElementById("root");
+    if (!lastResult) {
+      root.innerHTML = '<div class="empty">Waiting for tool result&hellip;</div>';
+      return;
+    }
+    var meta = lastResult._meta || {};
+    var ui = meta.ui || {};
+    if (ui.renderer) renderer = ui.renderer;
+    if (ui.resourceUri) resourceUri = ui.resourceUri;
+
+    var displayName = toolName || (hostContext && hostContext.toolInfo && hostContext.toolInfo.tool && hostContext.toolInfo.tool.name) || "Tool result";
+    var data = lastResult.structuredContent;
+    if (typeof data === "undefined") {
+      var content = (lastResult.content && lastResult.content[0]) || null;
+      if (content && content.type === "text" && typeof content.text === "string") {
+        try { data = JSON.parse(content.text); }
+        catch (e) { data = content.text; }
+      }
+    }
+
+    if (lastResult.isError) {
+      root.innerHTML = '';
+      root.appendChild(buildHeader(displayName, "Error"));
+      var box = document.createElement("div");
+      box.className = "alert";
+      box.textContent = stringifyForError(lastResult);
+      root.appendChild(box);
+      root.appendChild(buildActions(data));
+      return;
+    }
+
+    var body = pickRenderer(renderer, data);
+    root.innerHTML = '';
+    root.appendChild(buildHeader(displayName, body.subtitle));
+    root.appendChild(body.node);
+    root.appendChild(buildActions(data));
+  }
+
+  function buildHeader(title, subtitle) {
+    var div = document.createElement("div");
+    div.className = "header";
+    var t = document.createElement("div");
+    t.className = "title";
+    t.textContent = title;
+    div.appendChild(t);
+    if (subtitle) {
+      var s = document.createElement("div");
+      s.className = "subtitle";
+      s.textContent = subtitle;
+      div.appendChild(s);
+    }
+    return div;
+  }
+
+  function pickRenderer(name, data) {
+    if (name && name !== "auto") {
+      var fn = renderers[name];
+      if (fn) return fn(data);
+    }
+    if (Array.isArray(data) && data.length && data.every(isPlainObject)) {
+      return renderers.table(data);
+    }
+    if (isPlainObject(data)) {
+      return renderers.card(data);
+    }
+    return renderers.json(data);
+  }
+
+  function isPlainObject(v) {
+    return v && typeof v === "object" && !Array.isArray(v);
+  }
+
+  var renderers = {
+    json: function (data) {
+      var pre = document.createElement("pre");
+      pre.className = "json";
+      try { pre.textContent = JSON.stringify(data, null, 2); }
+      catch (e) { pre.textContent = String(data); }
+      return { node: pre, subtitle: "JSON" };
+    },
+    card: function (data) {
+      var card = document.createElement("div");
+      card.className = "card";
+      var grid = document.createElement("div");
+      grid.className = "kv";
+      var keys = Object.keys(data || {});
+      if (!keys.length) {
+        var empty = document.createElement("div");
+        empty.className = "empty";
+        empty.textContent = "(empty object)";
+        return { node: empty, subtitle: "" };
+      }
+      keys.forEach(function (k) {
+        var dk = document.createElement("div"); dk.className = "k"; dk.textContent = k;
+        var dv = document.createElement("div"); dv.className = "v"; dv.textContent = formatValue(data[k]);
+        grid.appendChild(dk); grid.appendChild(dv);
+      });
+      card.appendChild(grid);
+      return { node: card, subtitle: keys.length + " fields" };
+    },
+    table: function (rows) {
+      if (!Array.isArray(rows) || !rows.length) {
+        var empty = document.createElement("div");
+        empty.className = "empty";
+        empty.textContent = "(empty list)";
+        return { node: empty, subtitle: "0 rows" };
+      }
+      var columns = collectColumns(rows);
+      var wrap = document.createElement("div"); wrap.style.overflow = "auto";
+      var table = document.createElement("table");
+      var thead = document.createElement("thead");
+      var hr = document.createElement("tr");
+      columns.forEach(function (c) { var th = document.createElement("th"); th.textContent = c; hr.appendChild(th); });
+      thead.appendChild(hr); table.appendChild(thead);
+      var tbody = document.createElement("tbody");
+      rows.forEach(function (row) {
+        var tr = document.createElement("tr");
+        columns.forEach(function (c) {
+          var td = document.createElement("td");
+          td.textContent = formatValue(row && row[c]);
+          tr.appendChild(td);
+        });
+        tbody.appendChild(tr);
+      });
+      table.appendChild(tbody);
+      wrap.appendChild(table);
+      return { node: wrap, subtitle: rows.length + " row" + (rows.length === 1 ? "" : "s") };
+    },
+    form: function (data) {
+      // Read-only form; submission would need a configured action.
+      var card = renderers.card(data || {});
+      card.subtitle = "Form view (read-only)";
+      return card;
+    }
+  };
+
+  function collectColumns(rows) {
+    var seen = Object.create(null);
+    var cols = [];
+    rows.forEach(function (row) {
+      if (row && typeof row === "object" && !Array.isArray(row)) {
+        Object.keys(row).forEach(function (k) {
+          if (!seen[k]) { seen[k] = true; cols.push(k); }
+        });
+      }
+    });
+    return cols.length ? cols : ["value"];
+  }
+
+  function formatValue(v) {
+    if (v === null) return "—";
+    if (typeof v === "undefined") return "";
+    if (typeof v === "object") {
+      try { return JSON.stringify(v); } catch (e) { return String(v); }
+    }
+    return String(v);
+  }
+
+  function stringifyForError(result) {
+    try {
+      var content = result.content && result.content[0];
+      if (content && content.type === "text" && content.text) return content.text;
+      return JSON.stringify(result, null, 2);
+    } catch (e) {
+      return String(result);
+    }
+  }
+
+  // -------------------- actions --------------------
+  function buildActions(currentData) {
+    var meta = (lastResult && lastResult._meta) || {};
+    var ui = meta.ui || {};
+    var actions = Array.isArray(ui.actions) ? ui.actions : [];
+    var div = document.createElement("div");
+    if (!actions.length) return div;
+    div.className = "actions";
+    actions.forEach(function (a, i) {
+      var btn = document.createElement("button");
+      if (i === 0) btn.classList.add("primary");
+      btn.textContent = a.label || a.tool || "Run";
+      btn.addEventListener("click", function () {
+        if (!a.tool) return;
+        btn.disabled = true;
+        var args = a.arguments || {};
+        call("tools/call", { name: a.tool, arguments: args })
+          .then(function (result) {
+            lastResult = result;
+            // The host may also push a separate ui/notifications/tool-result;
+            // either way, render what we have now.
+            render();
+            emitSize();
+          })
+          .catch(function (err) {
+            var alert = document.createElement("div");
+            alert.className = "alert";
+            alert.textContent = (err && err.message) ? err.message : "Tool call failed.";
+            document.getElementById("root").appendChild(alert);
+          })
+          .then(function () { btn.disabled = false; });
+      });
+      div.appendChild(btn);
+    });
+    return div;
+  }
+})();
+</script>
+</body>
+</html>

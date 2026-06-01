@@ -1,0 +1,14 @@
+/Users/amir.khan/Documents/cursor-workspaces/mcp-apps-policy/target/debug/deps/serde-bd38e141d45b67b3.d: /Users/amir.khan/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/lib.rs /Users/amir.khan/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/integer128.rs /Users/amir.khan/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/private/mod.rs /Users/amir.khan/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/private/de.rs /Users/amir.khan/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/private/ser.rs /Users/amir.khan/Documents/cursor-workspaces/mcp-apps-policy/target/debug/build/serde-794e2c02a520af9a/out/private.rs
+
+/Users/amir.khan/Documents/cursor-workspaces/mcp-apps-policy/target/debug/deps/libserde-bd38e141d45b67b3.rlib: /Users/amir.khan/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/lib.rs /Users/amir.khan/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/integer128.rs /Users/amir.khan/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/private/mod.rs /Users/amir.khan/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/private/de.rs /Users/amir.khan/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/private/ser.rs /Users/amir.khan/Documents/cursor-workspaces/mcp-apps-policy/target/debug/build/serde-794e2c02a520af9a/out/private.rs
+
+/Users/amir.khan/Documents/cursor-workspaces/mcp-apps-policy/target/debug/deps/libserde-bd38e141d45b67b3.rmeta: /Users/amir.khan/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/lib.rs /Users/amir.khan/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/integer128.rs /Users/amir.khan/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/private/mod.rs /Users/amir.khan/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/private/de.rs /Users/amir.khan/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/private/ser.rs /Users/amir.khan/Documents/cursor-workspaces/mcp-apps-policy/target/debug/build/serde-794e2c02a520af9a/out/private.rs
+
+/Users/amir.khan/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/lib.rs:
+/Users/amir.khan/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/integer128.rs:
+/Users/amir.khan/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/private/mod.rs:
+/Users/amir.khan/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/private/de.rs:
+/Users/amir.khan/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/private/ser.rs:
+/Users/amir.khan/Documents/cursor-workspaces/mcp-apps-policy/target/debug/build/serde-794e2c02a520af9a/out/private.rs:
+
+# env-dep:OUT_DIR=/Users/amir.khan/Documents/cursor-workspaces/mcp-apps-policy/target/debug/build/serde-794e2c02a520af9a/out

@@ -1,0 +1,20 @@
+# Copyright 2026 Salesforce, Inc. All rights reserved.
+version: "3.3"
+
+services:
+  local-flex:
+    image: mulesoft/flex-gateway:latest
+    platform: linux/amd64
+    environment:
+      LOG_LEVEL: debug
+      FLEX_LOG_LEVEL: 7
+    ports:
+      - 8081:8081
+    volumes:
+      - ./config:/usr/local/share/mulesoft/flex-gateway/conf.d/
+  backend:
+    # Stand-in MCP server. Replace with a real upstream
+    # (e.g. https://agent-network-ingress-gw-b2jb0y.1d6nel.usa-e1.cloudhub.io/a2ui-crm-demo/mcp)
+    # by editing playground/config/api.yaml.
+    image: kennethreitz/httpbin
+    platform: linux/amd64
