@@ -281,17 +281,27 @@ spec:
                   enum:
                     - call
                     - form
+                    - prompt
                   default: call
                   description: |
                     What clicking the button does.
-                    - `call` : issue `tools/call` immediately with the
-                               substituted arguments.
-                    - `form` : open an inline form built from the
-                               selected row's keys, let the user edit,
-                               then submit. System fields (`Id` and a
-                               small denylist) are hidden but passed
-                               through unchanged. Only meaningful
-                               with `select: single`.
+                    - `call`   : issue `tools/call` immediately with the
+                                 substituted arguments.
+                    - `form`   : open an inline form built from the
+                                 selected row's keys, let the user
+                                 edit, then submit. System fields
+                                 (`Id` and a small denylist) are
+                                 hidden but passed through unchanged.
+                                 Only meaningful with `select: single`.
+                    - `prompt` : do NOT call the tool from the iframe.
+                                 Instead, hand a chat-message string
+                                 (from `prompt`) back to the host so
+                                 the agent decides whether to call the
+                                 tool. Keeps the conversation chain
+                                 visible — useful for actions whose
+                                 outcome the user wants to confirm in
+                                 chat (e.g. "Order this material",
+                                 "Delete account").
                 argsTemplate:
                   type: string
                   default: ""
@@ -304,6 +314,16 @@ spec:
                     `select: single|multi` the raw template ships to
                     the bundle and substitution happens client-side
                     against the selection.
+                prompt:
+                  type: string
+                  default: ""
+                  description: |
+                    Chat-message template used when `mode == prompt`.
+                    Same `${field}` / `${row}` / `${rows[].Field}`
+                    substitution rules as `argsTemplate`. The bundle
+                    hands the resolved message to the host so the
+                    agent re-decides whether to call the underlying
+                    tool. Ignored for `mode: call` and `mode: form`.
 
     # ------------------------------------------------------------------
     # Default actions (apply to every tool)
@@ -337,8 +357,12 @@ spec:
             enum:
               - call
               - form
+              - prompt
             default: call
           argsTemplate:
+            type: string
+            default: ""
+          prompt:
             type: string
             default: ""
 

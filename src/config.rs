@@ -96,13 +96,22 @@ impl SelectMode {
     }
 }
 
-/// What clicking the button does. `Call` issues a `tools/call`
-/// directly; `Form` opens an inline edit form.
+/// What clicking the button does.
+/// - `Call`   issues a `tools/call` directly from the iframe.
+/// - `Form`   opens an inline edit form, then issues a `tools/call`.
+/// - `Prompt` hands a chat-message string back to the host so the agent
+///            (Claude / Goose) sees the request in the conversation and
+///            decides whether to call the underlying tool. The
+///            iframe never calls the tool directly. Keeps the
+///            conversation chain visible — useful for actions whose
+///            outcome the user wants to confirm in chat (e.g. "Order
+///            this material", "Delete account").
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ActionMode {
     Call,
     Form,
+    Prompt,
 }
 
 impl ActionMode {
@@ -110,6 +119,7 @@ impl ActionMode {
         match s.trim() {
             "" | "call" => Some(Self::Call),
             "form" => Some(Self::Form),
+            "prompt" => Some(Self::Prompt),
             _ => None,
         }
     }
@@ -118,6 +128,7 @@ impl ActionMode {
         match self {
             Self::Call => "call",
             Self::Form => "form",
+            Self::Prompt => "prompt",
         }
     }
 }
@@ -134,6 +145,14 @@ pub struct Action {
     pub args_template: Option<serde_json::Value>,
     pub select: SelectMode,
     pub mode: ActionMode,
+    /// Chat-message template used when `mode == Prompt`. Same `${field}`
+    /// / `${row}` / `${rows[].Field}` substitution rules as
+    /// `args_template`. The iframe sends this to the host, which
+    /// inserts it into the chat input (or sends it on the user's
+    /// behalf). The agent then re-decides whether to call the tool.
+    /// If unset, the bundle synthesises a default prompt from the
+    /// action's `label` and `tool`.
+    pub prompt_template: Option<String>,
 }
 
 /// CSP allowlists emitted as `_meta.ui.csp`. Same shape used at the
@@ -456,12 +475,19 @@ fn parse_action(rule: &str, raw: &Actions0Config) -> Result<Action, ConfigError>
         .map_err(|e| ConfigError::Tool(rule.into(), format!("action -> {tool}: {e}")))?;
     let mode = parse_action_mode(&raw.mode)
         .map_err(|e| ConfigError::Tool(rule.into(), format!("action -> {tool}: {e}")))?;
+    let prompt_template = raw
+        .prompt
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string());
     Ok(Action {
         tool,
         label,
         args_template,
         select,
         mode,
+        prompt_template,
     })
 }
 
@@ -484,12 +510,19 @@ fn parse_default_action(raw: &DefaultActions0Config) -> Result<Action, ConfigErr
         .map_err(|e| ConfigError::DefaultAction(format!("{tool}: {e}")))?;
     let mode = parse_action_mode(&raw.mode)
         .map_err(|e| ConfigError::DefaultAction(format!("{tool}: {e}")))?;
+    let prompt_template = raw
+        .prompt
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string());
     Ok(Action {
         tool,
         label,
         args_template,
         select,
         mode,
+        prompt_template,
     })
 }
 
@@ -500,7 +533,7 @@ fn parse_select(raw: &Option<String>) -> Result<SelectMode, String> {
 
 fn parse_action_mode(raw: &Option<String>) -> Result<ActionMode, String> {
     let s = raw.as_deref().unwrap_or("");
-    ActionMode::parse(s).ok_or_else(|| format!("invalid mode '{s}' (use call|form)"))
+    ActionMode::parse(s).ok_or_else(|| format!("invalid mode '{s}' (use call|form|prompt)"))
 }
 
 /// Map a tool name to a DNS label by replacing characters illegal in
@@ -713,6 +746,7 @@ mod tests {
                     args_template: Some("{\"sku\":\"${sku}\"}".into()),
                     select: None,
                     mode: None,
+                    prompt: None,
                 }]),
                 csp: None,
                 domain: None,
@@ -741,6 +775,7 @@ mod tests {
                         args_template: None,
                         select: None,
                         mode: None,
+                        prompt: None,
                     },
                     Actions0Config {
                         tool: "forbidden".into(),
@@ -748,6 +783,7 @@ mod tests {
                         args_template: None,
                         select: None,
                         mode: None,
+                        prompt: None,
                     },
                 ]),
                 csp: None,
@@ -774,6 +810,7 @@ mod tests {
                     args_template: Some("{ not json".into()),
                     select: None,
                     mode: None,
+                    prompt: None,
                 }]),
                 csp: None,
                 domain: None,

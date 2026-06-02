@@ -419,6 +419,29 @@ fn resolve_action(action: &Action, ctx: &Value) -> Value {
         // away.
         map.insert("mode".to_string(), Value::String("form".to_string()));
     }
+
+    // `mode: "prompt"` ships a chat-message string instead of (or in
+    // addition to) `arguments`. The bundle hands this to the host so
+    // the agent re-decides whether to call the tool — the iframe never
+    // calls the tool directly. For `select == None` we substitute
+    // server-side against `structuredContent`; for `single`/`multi` the
+    // template ships raw and the bundle substitutes against the row pick.
+    if matches!(action.mode, ActionMode::Prompt) {
+        if let Some(tmpl) = &action.prompt_template {
+            match action.select {
+                SelectMode::None => {
+                    let resolved = substitute(tmpl, ctx);
+                    map.insert("prompt".to_string(), Value::String(resolved));
+                }
+                SelectMode::Single | SelectMode::Multi => {
+                    map.insert(
+                        "promptTemplate".to_string(),
+                        Value::String(tmpl.clone()),
+                    );
+                }
+            }
+        }
+    }
     out
 }
 
@@ -703,6 +726,7 @@ mod tests {
                     args_template: Some("{\"sku\":\"${sku}\"}".into()),
                     select: None,
                     mode: None,
+                    prompt: None,
                 }]),
                 csp: None,
                 domain: None,
@@ -826,6 +850,7 @@ mod tests {
                 args_template: None,
                 select: None,
                 mode: None,
+                prompt: None,
             }]),
             ..raw_empty()
         })
@@ -942,6 +967,7 @@ mod tests {
                     args_template: Some("{\"sku\":\"${sku}\"}".into()),
                     select: None,
                     mode: None,
+                    prompt: None,
                 }]),
                 csp: None,
                 domain: None,
@@ -982,6 +1008,7 @@ mod tests {
                     args_template: Some("{\"sku\":\"${sku}\"}".into()),
                     select: None,
                     mode: None,
+                    prompt: None,
                 }]),
                 csp: None,
                 domain: None,
@@ -1003,6 +1030,85 @@ mod tests {
             .unwrap();
         assert_eq!(actions[0]["tool"], "create_order");
         assert_eq!(actions[0]["arguments"], json!({"sku": "A1"}));
+    }
+
+    #[test]
+    fn prompt_mode_action_select_none_substitutes_server_side() {
+        // `mode: "prompt"` with no row selection: the policy
+        // substitutes `${field}` against `structuredContent` and ships
+        // the resolved message under `prompt`. No `arguments` field —
+        // the bundle never calls the tool from inside the iframe.
+        let cfg = PolicyConfig::from_raw(&RawConfig {
+            tools: Some(vec![crate::generated::config::Tools0Config {
+                name: "get_inventory".into(),
+                renderer: None,
+                appify: None,
+                actions: Some(vec![crate::generated::config::Actions0Config {
+                    tool: "submit_order".into(),
+                    label: "Order this material".into(),
+                    args_template: None,
+                    select: None,
+                    mode: Some("prompt".into()),
+                    prompt: Some("Please order material ${productId}".into()),
+                }]),
+                csp: None,
+                domain: None,
+            }]),
+            ..raw_empty()
+        })
+        .unwrap();
+        let mut body = json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "result": {
+                "content": [{"type": "text", "text": "{\"productId\":\"SKU-42\"}"}]
+            }
+        });
+        rewrite_response(&cfg, &mut body, Some("get_inventory"));
+        let action = &body["result"]["_meta"]["ui"]["actions"][0];
+        assert_eq!(action["mode"], "prompt");
+        assert_eq!(action["prompt"], "Please order material SKU-42");
+        assert!(action.get("arguments").is_none(),
+            "prompt mode must not ship pre-resolved arguments");
+    }
+
+    #[test]
+    fn prompt_mode_action_select_single_ships_raw_template() {
+        // `mode: "prompt"` + `select: "single"`: substitution happens
+        // client-side against the user's row pick, so the policy must
+        // ship the template raw under `promptTemplate`.
+        let cfg = PolicyConfig::from_raw(&RawConfig {
+            tools: Some(vec![crate::generated::config::Tools0Config {
+                name: "get_accounts".into(),
+                renderer: None,
+                appify: None,
+                actions: Some(vec![crate::generated::config::Actions0Config {
+                    tool: "delete_accounts".into(),
+                    label: "Delete".into(),
+                    args_template: None,
+                    select: Some("single".into()),
+                    mode: Some("prompt".into()),
+                    prompt: Some("Delete account ${Id} (${Name})".into()),
+                }]),
+                csp: None,
+                domain: None,
+            }]),
+            ..raw_empty()
+        })
+        .unwrap();
+        let mut body = json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "result": {
+                "content": [{"type": "text", "text": "[]"}]
+            }
+        });
+        rewrite_response(&cfg, &mut body, Some("get_accounts"));
+        let action = &body["result"]["_meta"]["ui"]["actions"][0];
+        assert_eq!(action["mode"], "prompt");
+        assert_eq!(action["promptTemplate"], "Delete account ${Id} (${Name})");
+        assert!(action.get("prompt").is_none(),
+            "single-select prompt mode ships the raw template, not a resolved string");
     }
 
     #[test]

@@ -21,14 +21,15 @@
           "tool": "update_accounts",
           "label": "Edit",
           "select": "single",
-          "mode": "form",
-          "argsTemplate": "{\"accounts\":[\"${row}\"]}"
+          "mode": "prompt",
+          "prompt": "Please update the account ${Id} (${Name}). I'd like to change the following fields: "
         },
         {
           "tool": "delete_accounts",
           "label": "Delete",
           "select": "multi",
-          "argsTemplate": "{\"Ids\":\"${rows[].Id}\"}"
+          "mode": "prompt",
+          "prompt": "Please delete the following accounts: ${rows[].Name} (Ids: ${rows[].Id}). Confirm with me first."
         }
       ]
     },
@@ -41,7 +42,7 @@
   "denyTools": [],
   "customBundles": [],
 
-  "previewMode": true,
-  "debugHeaders": true,
+  "previewMode": false,
+  "debugHeaders": false,
   "maxBodyBytes": 1048576
 }

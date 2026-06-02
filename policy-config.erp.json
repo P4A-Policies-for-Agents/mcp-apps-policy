@@ -20,7 +20,8 @@
         {
           "tool": "submit_order",
           "label": "Order this material",
-          "argsTemplate": "{\"MATERIAL\":\"${productId}\",\"TARGET_QTY\":\"1\"}"
+          "mode": "prompt",
+          "prompt": "Please order material ${productId} with quantity 1."
         }
       ]
     },
@@ -31,7 +32,8 @@
         {
           "tool": "submit_delivery",
           "label": "Create delivery",
-          "argsTemplate": "{\"ORDER_NO\":\"${ORDER_NO}\"}"
+          "mode": "prompt",
+          "prompt": "Please create a delivery for order ${SALESDOCUMENT}."
         }
       ]
     },
@@ -45,7 +47,7 @@
   "denyTools": [],
   "customBundles": [],
 
-  "previewMode": true,
-  "debugHeaders": true,
+  "previewMode": false,
+  "debugHeaders": false,
   "maxBodyBytes": 1048576
 }

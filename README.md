@@ -24,6 +24,21 @@ policy:
 Hosts that don't support the MCP Apps extension simply ignore the
 `_meta.ui` field and behave exactly as they did before.
 
+### Tested hosts
+
+| Host | Status |
+| --- | --- |
+| **Claude.ai** | ✅ Tested |
+| **Goose** | ✅ Tested |
+| **MCP Inspector** | ✅ Tested |
+| **ChatGPT** | ❌ Not supported — see [`ROADMAP.md`](./ROADMAP.md) |
+
+ChatGPT does not speak SEP-1865; its renderer needs the proprietary
+OpenAI Apps SDK shape (`openai/widgetCSP`, `openai/widgetDomain`,
+`openai/outputTemplate`, `text/html+skybridge` MIME, and the
+`window.openai` runtime API). Adding that without breaking the SEP-1865
+hosts is on the roadmap.
+
 > **Status — Public Preview.** MCP Apps (SEP-1865) is itself an
 > evolving extension; this policy ships a small, conservative built-in
 > bundle and three master switches so operators can roll out
@@ -152,14 +167,15 @@ The policy only modifies *responses* (and the synthesised
       "tool": "update_accounts",
       "label": "Edit",
       "select": "single",
-      "mode": "form",
-      "argsTemplate": "{\"accounts\":[\"${row}\"]}"
+      "mode": "prompt",
+      "prompt": "Please update account ${Id} (${Name}). I want to change: "
     },
     {
       "tool": "delete_accounts",
       "label": "Delete",
       "select": "multi",
-      "argsTemplate": "{\"Ids\":\"${rows[].Id}\"}"
+      "mode": "prompt",
+      "prompt": "Please delete accounts ${rows[].Name} (Ids: ${rows[].Id}). Confirm with me first."
     }
   ]
 }
@@ -176,9 +192,27 @@ The policy only modifies *responses* (and the synthesised
 - `actions[].select` — row-selection requirement: `none` (default),
   `single` (radio column, button disabled until a row is picked), or
   `multi` (checkbox column, enabled when ≥ 1 row is checked).
-- `actions[].mode` — `call` (default; fire `tools/call` immediately)
-  or `form` (open an inline edit form built from the selected row,
-  let the user edit, then submit). `form` requires `select: single`.
+- `actions[].mode` — `call` (default; fire `tools/call` immediately
+  from the iframe), `form` (open an inline edit form built from the
+  selected row, let the user edit, then submit — requires
+  `select: single`), or `prompt` (do **not** call the tool from the
+  iframe; instead hand a chat-message string back to the host so the
+  agent decides whether to call the tool — keeps the conversation
+  chain visible, recommended for actions whose outcome the user
+  wants to confirm in chat such as Order, Edit, Delete).
+- `actions[].prompt` — chat-message template used by `mode: "prompt"`.
+  Same `${field}` / `${row}` / `${rows}` / `${rows[].Field}`
+  substitution rules as `argsTemplate`. The bundle resolves it at
+  click time against the user's pick (or against
+  `structuredContent` for `select: none`) and shows it inside an
+  in-iframe panel with three buttons: **Send to chat** (post via
+  the SEP-1865 `ui/message` request so the prompt appears as a
+  user turn and the agent decides whether to call the tool),
+  **Copy** (clipboard for manual paste), and **Dismiss**. Following
+  the official `basic-server-react` reference, Send is always
+  enabled — if the host doesn't implement `ui/message` it
+  rejects the request and the button surfaces a *"Not supported —
+  use Copy"* fallback.
 - `actions[].argsTemplate` is a JSON string with placeholders the
   bundle resolves at click time. With `select: none` the substitution
   happens server-side against `structuredContent` (legacy). With
@@ -439,6 +473,7 @@ during rollout.
 | Claude.ai logs *"Tool X has no UI resource (no ui/resourceUri in tool._meta)"* even though `_meta.ui.resourceUri` is set | Strict SEP-1865 hosts only read `_meta["io.modelcontextprotocol/ui"]` (the spec-namespaced key) and ignore the `_meta.ui` alias. As of 0.1.10 the policy emits both. Upgrade to ≥ 0.1.10 and re-apply. |
 | ChatGPT shows *"Widget CSP is not set for this template. A CSP is required for app submission"* and/or *"Widget domain is not set for this template. A unique domain is required for app submission"* | The host requires `_meta.ui.csp` and `_meta.ui.domain` per template. As of 0.1.11 the policy emits both — empty allowlists for CSP, and a synthesised `<toolName>.mcp-apps-policy.local` domain when not explicitly set. Upgrade to ≥ 0.1.11 and re-apply, or set `csp` / `domain` (global or per-tool) for stable values. |
 | Edit / Delete buttons appear in a table but do nothing useful | Pre-0.1.11 actions resolved `${field}` against the *top-level* `structuredContent` and never the picked row, so list-shaped tools (e.g. `get_accounts`) shipped empty `Id`s. As of 0.1.11, actions can declare `select: single` / `select: multi` and the bundle renders a radio/checkbox column; `${field}`, `${row}`, `${rows}`, and `${rows[].Field}` resolve against the user's pick at click time. `mode: form` opens an inline edit form for the selected row and submits the edits as `tools/call` arguments. |
+| Edit / Delete / Order succeeds but the agent never knows it happened (the action runs silently from the iframe and the conversation chain is broken) | Pre-0.1.18 every action fired `tools/call` directly from the iframe — the upstream got the call but the agent (Claude / Goose) never saw it. As of 0.1.19, `mode: "prompt"` posts the resolved message to the host via the SEP-1865 `ui/message` request (`role: "user"`); the host routes it back as a user turn and the agent re-decides whether to call the tool. Apps gate the call on `hostCapabilities.message` from `ui/initialize`; when the host doesn't advertise it (older Claude.ai builds, some Goose versions) the bundle shows the resolved prompt in an in-iframe panel with a **Copy** button as a manual fallback. (0.1.18 used invented `ui/notifications/prompt-input` / `ui/notifications/intent` names that no host implements; 0.1.19 replaces them with the spec-correct `ui/message`.) |
 | MCP Inspector iframe never sees `tool-result` | Pre-0.1.11 the bundle posted with `targetOrigin: "*"` which Inspector's strict CSP can drop. As of 0.1.11 the bundle pins `targetOrigin` to the host's origin captured from the first inbound message. |
 | Action button arguments are empty | `argsTemplate` references a `${field}` not present in `structuredContent` | Inspect the tool's `result.structuredContent` and align the template. |
 | `resources/read` for a `ui://` URI hits the upstream | Policy load order / wrong policy ref | Check `anypoint-cli-v4 api-mgr policy list` shows `mcp-apps-policy` applied. |

@@ -51,6 +51,10 @@
   @media (prefers-color-scheme: dark) {
     .alert { background: #3b1f23; color: #f8b4ba; border-color: #5a2a30; }
   }
+  .prompt-panel { margin-top: 12px; padding: 10px 12px; border: 1px dashed var(--accent); border-radius: var(--radius); background: var(--row); font-size: 13px; }
+  .prompt-panel .prompt-label { color: var(--muted); font-size: 12px; margin-bottom: 4px; }
+  .prompt-panel .prompt-text { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; word-break: break-word; white-space: pre-wrap; margin-bottom: 6px; }
+  .prompt-panel .prompt-actions { display: flex; gap: 6px; }
 </style>
 </head>
 <body>
@@ -67,6 +71,7 @@
   var nextId = 1;
   var pending = new Map();
   var hostContext = null;
+  var hostCapabilities = null;
   var lastResult = null;
   var renderer = "auto";
   var resourceUri = null;
@@ -225,6 +230,12 @@
     appInfo: { name: "mcp-apps-policy/auto", version: "0.1.0" }
   }).then(function (result) {
     hostContext = result && result.hostContext ? result.hostContext : {};
+    // SEP-1865 returns `hostCapabilities` on `ui/initialize`. Apps must
+    // gate `ui/message` (post a user turn into the conversation) on
+    // `hostCapabilities.message` — hosts that don't advertise it will
+    // silently drop the request. Pin this so prompt-mode actions know
+    // whether the host can route the message back to the agent.
+    hostCapabilities = (result && result.hostCapabilities) || {};
     if (hostContext && hostContext.toolInfo && hostContext.toolInfo.tool) {
       toolName = hostContext.toolInfo.tool.name || null;
     }
@@ -585,6 +596,15 @@
       openInlineForm(a, row, btn);
       return;
     }
+    if (mode === "prompt") {
+      // Resolve prompt template against the current selection / row /
+      // top-level data and hand the message back to the host so the
+      // agent re-decides whether to call the tool. The iframe never
+      // calls the tool directly in this mode — the tool call (if any)
+      // appears in the conversation as the agent's own decision.
+      firePromptAction(a, btn, currentData);
+      return;
+    }
     var args = resolveActionArgs(a, currentData);
     fireToolsCall(a, args, btn);
   }
@@ -820,6 +840,169 @@
       .then(function (out) { if (btn) btn.disabled = false; return out; }, function (err) {
         if (btn) btn.disabled = false; throw err;
       });
+  }
+
+  // -------------------- prompt-mode actions --------------------
+  // `mode: "prompt"` actions hand a chat-message string back to the
+  // host instead of issuing `tools/call` from inside the iframe. The
+  // agent (Claude / Goose) then decides whether to call the underlying
+  // tool — keeping the conversation chain visible and preventing
+  // out-of-band tool calls (e.g. a Delete that happens silently).
+  //
+  // Wire format: SEP-1865 defines `ui/message` (a JSON-RPC *request*
+  // with `id`, not a notification) for posting a user turn back into
+  // the conversation. The host returns `{ isError?: boolean }`. Apps
+  // MUST check `hostCapabilities.message` from the `ui/initialize`
+  // response before sending — hosts that don't advertise it will
+  // silently drop the request. When the capability is missing we fall
+  // back to an in-iframe panel where the user can copy the prompt
+  // and paste it manually.
+  //
+  // Spec refs:
+  //   github.com/modelcontextprotocol/ext-apps
+  //     specification/draft/apps.mdx (lines 1109-1146, capabilities 522)
+  //     src/spec.types.ts (CreateMessageRequest, HostCapabilities)
+  // Click handler: resolve the template, show a panel that lets the
+  // user pick between "Send to chat" (post via SEP-1865 `ui/message`
+  // so it appears as a user turn) and "Copy" (manual paste). The
+  // Send button is disabled when the host hasn't advertised the
+  // `message` capability — typically older Claude.ai / Goose builds.
+  function firePromptAction(action, btn, currentData) {
+    var prompt = resolvePromptText(action, currentData);
+    if (!prompt) {
+      prompt = (action.label || "Run") + " " + (action.tool || "tool");
+    }
+    showPromptPanel(prompt);
+    emitSize();
+  }
+
+  function postMessageToHost(prompt) {
+    // SEP-1865 `ui/message` request (not a notification — has `id`,
+    // returns `{ isError?: boolean }`). Apps must check
+    // `hostCapabilities.message` first; hosts that don't advertise it
+    // silently drop the request.
+    return call("ui/message", {
+      role: "user",
+      content: [{ type: "text", text: prompt }]
+    });
+  }
+
+  function resolvePromptText(action, currentData) {
+    var sel = action.select || "none";
+    if (sel === "none") {
+      // Server-side substitution already applied for `select: none`.
+      // The bundle still substitutes against `currentData` as a
+      // fallback for templates the server couldn't resolve.
+      if (typeof action.prompt === "string") {
+        var ctx = currentData && typeof currentData === "object" ? currentData : {};
+        return substituteString(action.prompt, ctx);
+      }
+      return action.prompt || "";
+    }
+    var tmpl = action.promptTemplate || action.prompt;
+    if (typeof tmpl !== "string") return "";
+    if (sel === "single") {
+      var idx = selection.selectedIdx;
+      var row = idx === null ? {} : (selection.rows[idx] || {});
+      var ctx2 = {};
+      Object.keys(row).forEach(function (k) { ctx2[k] = row[k]; });
+      ctx2.row = row;
+      return substituteString(tmpl, ctx2);
+    }
+    // multi
+    var picked = [];
+    selection.multiIdx.forEach(function (i) { picked.push(selection.rows[i]); });
+    return substitutePromptMulti(tmpl, picked);
+  }
+
+  function substitutePromptMulti(tmpl, rows) {
+    return tmpl.replace(/\$\{([^}]+)\}/g, function (m, key) {
+      if (key === "rows") {
+        try { return JSON.stringify(rows); } catch (_) { return String(rows); }
+      }
+      var proj = /^rows\[\]\.(.+)$/.exec(key);
+      if (proj) {
+        return rows.map(function (r) { return r ? String(r[proj[1]]) : ""; }).join(", ");
+      }
+      var v = lookupSingle(rows[0] || {}, key);
+      if (v === undefined) return m;
+      if (v === null) return "";
+      if (typeof v === "object") {
+        try { return JSON.stringify(v); } catch (_) { return String(v); }
+      }
+      return String(v);
+    });
+  }
+
+  function showPromptPanel(prompt) {
+    var root = document.getElementById("root");
+    var prior = root.querySelector(".prompt-panel");
+    if (prior) prior.parentNode.removeChild(prior);
+
+    var panel = document.createElement("div");
+    panel.className = "prompt-panel";
+    var label = document.createElement("div");
+    label.className = "prompt-label";
+    label.textContent = "Send this to chat, or copy it to paste manually — the agent decides whether to act:";
+    var text = document.createElement("div");
+    text.className = "prompt-text";
+    text.textContent = prompt;
+
+    var actionsRow = document.createElement("div");
+    actionsRow.className = "prompt-actions";
+
+    var send = document.createElement("button");
+    send.classList.add("primary");
+    send.textContent = "Send to chat";
+    // The reference SEP-1865 example doesn't gate on
+    // `hostCapabilities.message` — it calls `ui/message` and treats
+    // `isError`/thrown errors as the failure signal. We do the same so
+    // hosts that support `ui/message` but don't advertise it (the
+    // capability is optional today) aren't blocked.
+    send.addEventListener("click", function () {
+      send.disabled = true;
+      send.textContent = "Sending…";
+      postMessageToHost(prompt).then(function (res) {
+        if (res && res.isError) {
+          send.textContent = "Send failed — use Copy";
+        } else {
+          // Successful post — the message is now a user turn in the
+          // chat; dismiss the panel so the iframe stays uncluttered.
+          if (panel.parentNode) panel.parentNode.removeChild(panel);
+          emitSize();
+        }
+      }).catch(function () {
+        send.textContent = "Not supported — use Copy";
+        send.title = "This host does not implement ui/message";
+      });
+    });
+
+    var copy = document.createElement("button");
+    copy.textContent = "Copy";
+    copy.addEventListener("click", function () {
+      try {
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+          navigator.clipboard.writeText(prompt).catch(function () {});
+        }
+      } catch (_) { /* best-effort */ }
+      copy.textContent = "Copied";
+      setTimeout(function () { copy.textContent = "Copy"; }, 1500);
+    });
+
+    var dismiss = document.createElement("button");
+    dismiss.textContent = "Dismiss";
+    dismiss.addEventListener("click", function () {
+      if (panel.parentNode) panel.parentNode.removeChild(panel);
+      emitSize();
+    });
+
+    actionsRow.appendChild(send);
+    actionsRow.appendChild(copy);
+    actionsRow.appendChild(dismiss);
+    panel.appendChild(label);
+    panel.appendChild(text);
+    panel.appendChild(actionsRow);
+    root.appendChild(panel);
   }
 })();
 </script>

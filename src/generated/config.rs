@@ -38,6 +38,8 @@ pub struct DefaultActions0Config {
     pub label: String,
     #[serde(alias = "mode")]
     pub mode: Option<String>,
+    #[serde(alias = "prompt")]
+    pub prompt: Option<String>,
     #[serde(alias = "select")]
     pub select: Option<String>,
     #[serde(alias = "tool")]
@@ -51,6 +53,8 @@ pub struct Actions0Config {
     pub label: String,
     #[serde(alias = "mode")]
     pub mode: Option<String>,
+    #[serde(alias = "prompt")]
+    pub prompt: Option<String>,
     #[serde(alias = "select")]
     pub select: Option<String>,
     #[serde(alias = "tool")]

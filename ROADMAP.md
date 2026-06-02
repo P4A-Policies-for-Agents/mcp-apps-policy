@@ -128,6 +128,39 @@ bundle so the policy works without external hosting.
   `postMessage` `targetOrigin` to it. Pre-0.1.11 we sent every
   message with `targetOrigin: "*"`, which MCP Inspector's strict
   cross-origin isolation could drop.
+- **Prompt-mode actions (0.1.18–0.1.21).** Actions can declare
+  `mode: "prompt"` with a `prompt` template (`${field}` / `${row}` /
+  `${rows[].Field}` substitution). On click, the bundle resolves the
+  template and renders an in-iframe panel offering **Send to chat**,
+  **Copy** and **Dismiss**. Send posts the resolved text to the host
+  via the SEP-1865 `ui/message` request (`role: "user"`); the host
+  routes it back to the agent as a user turn, so the agent (Claude /
+  Goose) re-decides whether to call the underlying tool and the
+  action stays inside the conversation chain. Copy writes the prompt
+  to the clipboard for hosts that don't support `ui/message`. Closes
+  the long-standing gap where Edit / Delete / Order buttons silently
+  called the upstream but the agent never saw it happen — pre-0.1.18,
+  an Order or Delete could complete without the agent acknowledging
+  it. 0.1.18 used invented `ui/notifications/prompt-input` /
+  `ui/notifications/intent` names that no host implements; 0.1.19
+  replaced them with the spec-correct `ui/message` request gated on
+  `hostCapabilities.message`; 0.1.21 drops the capability gate to
+  match the official `basic-server-react` reference (Send is always
+  enabled, failures surface inline as "use Copy") and lets the user
+  pick at click time between sending and copying instead of
+  auto-sending. The CRM `update_accounts` / `delete_accounts` actions
+  and the ERP `submit_order` / `submit_delivery` actions ship as
+  `mode: "prompt"` by default. `mode: "call"` (legacy direct
+  `tools/call`) and `mode: "form"` (inline edit form) remain
+  available for fire-and-forget actions.
+
+**Tested hosts**
+
+- ✅ **Claude.ai** — full handshake, action buttons, table actions.
+- ✅ **Goose** — auto-renders bundles, action buttons fire.
+- ✅ **MCP Inspector** — strict `text/html` MIME, strict spec-namespaced
+  `_meta` keys, `targetOrigin`-pinned `postMessage`.
+- ❌ **ChatGPT** — *not supported*. Tracked under v0.2 below.
 
 **Known gaps**
 
@@ -141,6 +174,17 @@ bundle so the policy works without external hosting.
 - SSE transformation is per-event with no cross-event state. Fine
   for current MCP responses (one frame per RPC) but not for
   protocols that split a single logical document across frames.
+- **ChatGPT not supported.** ChatGPT does not speak SEP-1865; its
+  renderer requires the OpenAI Apps SDK shape — proprietary `_meta`
+  keys (`openai/widgetCSP`, `openai/widgetDomain`,
+  `openai/outputTemplate`), a `text/html+skybridge` MIME on the
+  resource body, and `window.openai.toolOutput` /
+  `openai:set_globals` / `window.openai.callTool` on the View side
+  rather than `ui/notifications/tool-result` and `tools/call` over
+  postMessage. Earlier 0.1.x experiments tried to dual-emit both
+  shapes and broke the SEP-1865 hosts every time. Re-introducing
+  ChatGPT support without regressing Claude / Goose / Inspector is
+  on v0.2.
 
 ---
 
@@ -149,6 +193,20 @@ bundle so the policy works without external hosting.
 Goal: reduce config surface for operators by reading what the MCP
 server already advertises.
 
+- **ChatGPT (OpenAI Apps SDK) support.** Re-add the dual emission that
+  0.1.12–0.1.15 prototyped, but isolated so it cannot regress SEP-1865
+  hosts. Likely shape: a per-host adapter chosen at request time (e.g.
+  via the `User-Agent`, an explicit operator opt-in, or a separate
+  `ui://…/skybridge/<tool>` URI variant served only when the request
+  asks for it). Components needed: dual `_meta` keys on
+  `tools/list` / `tools/call` (`openai/widgetCSP`,
+  `openai/widgetDomain`, `openai/outputTemplate`),
+  `text/html+skybridge` MIME on the matching resource body, and a
+  `window.openai` runtime adapter in the embedded bundle that reads
+  `toolOutput` / listens for `openai:set_globals` / routes outbound
+  calls through `window.openai.callTool`. Acceptance bar: green
+  smoke-tests on Claude.ai, Goose, MCP Inspector *and* ChatGPT from
+  the same deployment.
 - **Schema-driven scaffolding.** Read `tools[].inputSchema` and
   `tools[].outputSchema` to pick the renderer (form for inputs with
   required fields, table for array outputs, card for object outputs)
