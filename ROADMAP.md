@@ -191,7 +191,76 @@ bundle so the policy works without external hosting.
 ## v0.2 — Schema-driven scaffolding *(planned)*
 
 Goal: reduce config surface for operators by reading what the MCP
-server already advertises.
+server already advertises, and close the highest-leverage UX gaps in
+the embedded bundle.
+
+Items below are listed in priority order. **(1)** is the headline
+feature — it unblocks the "let me edit optional fields before the
+agent submits" use case that today has no good answer. **(2)–(4)**
+and **(6)/(8)** are a low-cost UX bundle that together make the
+demos feel finished rather than prototype.
+
+1. **Pre-call forms via `inputSchema`.** New `formTools: [...]`
+   config: when the agent decides to call a listed tool, the policy
+   intercepts the first `tools/call`, returns a synthetic
+   `structuredContent` rendering the tool's `inputSchema` as a form
+   pre-filled with the agent's args, exposes optional fields, and
+   the form's submit re-issues the real call via `ui/message`. No
+   server changes, no new tool, no convention the MCP server has
+   to follow. Closes the gap where "Create Order for MULETEST0"
+   gives the user no chance to set optional fields before the
+   agent submits. Cost: medium — needs a "first call vs.
+   confirmation call" state machine and careful handling of the
+   agent's perception of the first call.
+2. **Schema-aware cells in the table renderer.** Today every cell is
+   text/JSON. Reading `outputSchema` (or `format` hints in the values
+   themselves) to render currency, dates, links, enums, and
+   booleans-as-checkboxes makes every CRM/ERP demo look 5× more
+   polished without any config. Cost: small, all in `auto.html`.
+3. **Form validation from `inputSchema` on `mode: form`.** Edit /
+   Update forms today are dumb — every key becomes a text input,
+   no required-field markers, no type checking. With `inputSchema`
+   we get required `*`, type-correct inputs (number / string / date
+   / enum dropdown), and an inline error before submit. Cost: small.
+4. **Tools/list rewriting (not just deny).** Operators sometimes want
+   to rename a tool, hide a parameter, or rewrite the description
+   ("Returns accounts" → "Returns accounts in your territory")
+   before it reaches the agent. Today the only knob is `denyTools[]`
+   — all-or-nothing. A `toolOverrides[]` config covers a real gap.
+   Cost: small.
+5. **Bundle hosted as a sibling Exchange asset.** Every bundle
+   iteration today costs a full policy republish + reapply. Letting
+   the bundle live as `mcp-apps-policy-bundle` and be fetched at
+   request time would cut iteration from minutes to seconds.
+   Cost: medium — needs a fetch path, caching, and a "fall back to
+   embedded" guard.
+6. **Confirmation dialog before `ui/message` for destructive
+   actions.** Delete / Update fire the prompt without a "Are you
+   sure? \[N items will be affected\]" affordance. One config flag
+   (`actions[].confirm: true | "<text>"`) and a small modal in the
+   bundle. Cost: tiny. UX win for production demos.
+7. **Telemetry / metrics.** Count appified responses, action clicks
+   (per `mode`), prompt-mode sends vs. copies, bundle loads,
+   body-cap hits. PDK exposes metrics; we currently expose none.
+   Operators running this against real traffic will want this.
+   Cost: small.
+8. **Error boundary in the bundle.** A `render()` throw today blanks
+   the iframe with no clue. A try / catch + error panel
+   ("Render failed: …, [Show JSON]") saves hours of debugging.
+   Cost: tiny.
+9. **Result diff after Edit.** When `mode: form` submits an update
+   and the agent responds, the iframe re-renders from scratch.
+   Showing "Name: Acme Corp → Acme Inc, Phone unchanged" for a
+   few seconds turns Edit from "did anything happen?" into a real
+   product. Cost: small.
+10. **Streaming-aware bundles.** SSE today is one transform per
+    frame; the bundle can't show partial state. For long-running
+    tools (a search that streams 500 rows), letting the bundle
+    accept incremental `tool-result` updates and append rows
+    instead of replacing would be a visible win. Cost: medium —
+    needs a small protocol on top of `tool-result`.
+
+Pre-existing v0.2 items, kept:
 
 - **ChatGPT (OpenAI Apps SDK) support.** Re-add the dual emission that
   0.1.12–0.1.15 prototyped, but isolated so it cannot regress SEP-1865
@@ -210,7 +279,9 @@ server already advertises.
 - **Schema-driven scaffolding.** Read `tools[].inputSchema` and
   `tools[].outputSchema` to pick the renderer (form for inputs with
   required fields, table for array outputs, card for object outputs)
-  and to derive sensible defaults for `argsTemplate`.
+  and to derive sensible defaults for `argsTemplate`. Subsumed in
+  part by **(2)** and **(3)** above; this entry covers the broader
+  "auto-pick a renderer from schema" angle.
 - **Action discovery from MCP relations.** Once MCP gains a standard
   for "next tool" hints (today this is in flux), wire those into
   `_meta.ui.actions` automatically and treat `tools[].actions[]` as
@@ -220,10 +291,6 @@ server already advertises.
   bundles per route without editing config.
 - **Per-rule rate caps.** Optional cap on transformations per second
   per tool, to protect the policy itself during incidents.
-- **Bundle hot-reload from a sibling Exchange asset.** Today bundles
-  ship inside the WASM artifact. v0.2 adds an opt-in path that
-  fetches a versioned bundle from Exchange so the iframe code can
-  iterate without re-publishing the policy.
 
 ---
 
