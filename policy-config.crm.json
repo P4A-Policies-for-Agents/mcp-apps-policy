@@ -5,6 +5,13 @@
 
   "renderer": "auto",
 
+  "csp": {
+    "connectDomains": [],
+    "resourceDomains": [],
+    "frameDomains": [],
+    "baseUriDomains": []
+  },
+
   "tools": [
     {
       "name": "get_accounts",
@@ -13,12 +20,15 @@
         {
           "tool": "update_accounts",
           "label": "Edit",
-          "argsTemplate": "{\"accounts\":[{\"Id\":\"${Id}\"}]}"
+          "select": "single",
+          "mode": "form",
+          "argsTemplate": "{\"accounts\":[\"${row}\"]}"
         },
         {
           "tool": "delete_accounts",
           "label": "Delete",
-          "argsTemplate": "{\"Ids\":[\"${Id}\"]}"
+          "select": "multi",
+          "argsTemplate": "{\"Ids\":\"${rows[].Id}\"}"
         }
       ]
     },

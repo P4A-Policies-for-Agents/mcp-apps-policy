@@ -5,6 +5,13 @@
 
   "renderer": "auto",
 
+  "csp": {
+    "connectDomains": [],
+    "resourceDomains": [],
+    "frameDomains": [],
+    "baseUriDomains": []
+  },
+
   "tools": [
     {
       "name": "get_inventory",

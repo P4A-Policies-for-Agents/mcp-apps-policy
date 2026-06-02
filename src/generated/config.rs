@@ -1,5 +1,16 @@
 use serde::Deserialize;
 #[derive(Deserialize, Clone, Debug)]
+pub struct CspConfig {
+    #[serde(alias = "baseUriDomains")]
+    pub base_uri_domains: Option<Vec<String>>,
+    #[serde(alias = "connectDomains")]
+    pub connect_domains: Option<Vec<String>>,
+    #[serde(alias = "frameDomains")]
+    pub frame_domains: Option<Vec<String>>,
+    #[serde(alias = "resourceDomains")]
+    pub resource_domains: Option<Vec<String>>,
+}
+#[derive(Deserialize, Clone, Debug)]
 pub struct Csp1Config {
     #[serde(alias = "baseUriDomains")]
     pub base_uri_domains: Option<Vec<String>>,
@@ -25,6 +36,10 @@ pub struct DefaultActions0Config {
     pub args_template: Option<String>,
     #[serde(alias = "label")]
     pub label: String,
+    #[serde(alias = "mode")]
+    pub mode: Option<String>,
+    #[serde(alias = "select")]
+    pub select: Option<String>,
     #[serde(alias = "tool")]
     pub tool: String,
 }
@@ -34,6 +49,10 @@ pub struct Actions0Config {
     pub args_template: Option<String>,
     #[serde(alias = "label")]
     pub label: String,
+    #[serde(alias = "mode")]
+    pub mode: Option<String>,
+    #[serde(alias = "select")]
+    pub select: Option<String>,
     #[serde(alias = "tool")]
     pub tool: String,
 }
@@ -43,6 +62,10 @@ pub struct Tools0Config {
     pub actions: Option<Vec<Actions0Config>>,
     #[serde(alias = "appify")]
     pub appify: Option<bool>,
+    #[serde(alias = "csp")]
+    pub csp: Option<Csp1Config>,
+    #[serde(alias = "domain")]
+    pub domain: Option<String>,
     #[serde(alias = "name")]
     pub name: String,
     #[serde(alias = "renderer")]
@@ -56,6 +79,8 @@ pub struct Config {
     pub appify_responses: Option<bool>,
     #[serde(alias = "appifyTools")]
     pub appify_tools: Option<bool>,
+    #[serde(alias = "csp")]
+    pub csp: Option<CspConfig>,
     #[serde(alias = "customBundles")]
     pub custom_bundles: Option<Vec<CustomBundles0Config>>,
     #[serde(alias = "debugHeaders")]
@@ -64,6 +89,8 @@ pub struct Config {
     pub default_actions: Option<Vec<DefaultActions0Config>>,
     #[serde(alias = "denyTools")]
     pub deny_tools: Option<Vec<String>>,
+    #[serde(alias = "domain")]
+    pub domain: Option<String>,
     #[serde(alias = "maxBodyBytes")]
     pub max_body_bytes: Option<i64>,
     #[serde(alias = "previewMode")]

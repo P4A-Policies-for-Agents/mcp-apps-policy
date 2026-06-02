@@ -32,6 +32,15 @@
   .kv .k { color: var(--muted); white-space: nowrap; }
   .kv .v { word-break: break-word; }
   pre.json { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12px; padding: 10px 12px; background: var(--row); border-radius: var(--radius); white-space: pre-wrap; word-break: break-word; max-height: 60vh; overflow: auto; }
+  td.select-cell, th.select-cell { width: 28px; padding: 6px 4px 6px 10px; }
+  .form-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.35); display: flex; align-items: center; justify-content: center; padding: 20px; z-index: 10; }
+  .form-card { background: var(--bg); color: var(--fg); border: 1px solid var(--border); border-radius: var(--radius); box-shadow: 0 8px 32px rgba(0,0,0,0.18); padding: 16px 18px; min-width: 280px; max-width: min(540px, calc(100vw - 40px)); width: 100%; max-height: calc(100vh - 40px); overflow: auto; }
+  .form-card h3 { margin: 0 0 12px 0; font-size: 14px; font-weight: 600; }
+  .form-row { display: flex; flex-direction: column; gap: 4px; margin-bottom: 10px; }
+  .form-row label { font-size: 12px; color: var(--muted); }
+  .form-row input, .form-row textarea { font: inherit; font-size: 13px; padding: 6px 8px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--bg); color: var(--fg); }
+  .form-row textarea { min-height: 64px; resize: vertical; }
+  .form-actions { display: flex; gap: 8px; justify-content: flex-end; margin-top: 12px; padding-top: 10px; border-top: 1px solid var(--border); }
   .actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 16px; padding-top: 12px; border-top: 1px solid var(--border); }
   button { font: inherit; font-size: 13px; padding: 6px 12px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--bg); color: var(--fg); cursor: pointer; }
   button:hover { background: var(--row); }
@@ -62,6 +71,13 @@
   var renderer = "auto";
   var resourceUri = null;
   var toolName = null;
+
+  // Tracks the user's table-row selection. Indexes into the row array
+  // currently being rendered; cleared on every render() so a fresh
+  // tool-result resets the picker. Action buttons read from this when
+  // resolving `${field}` substitutions for `select: single|multi`
+  // actions.
+  var selection = { rows: [], selectedIdx: null, multiIdx: new Set() };
 
   // -------------------- debug overlay --------------------
   // Gated on `?debug=1` in the iframe URL. Renders a fixed-position
@@ -105,9 +121,23 @@
   }
   debugInit();
 
+  // The host origin we're embedded under. Captured from the first
+  // inbound `event.origin` so we can scope `postMessage` targetOrigin
+  // tightly. Some hosts (notably MCP Inspector at
+  // `inspector.modelcontextprotocol.io`) refuse messages sent with
+  // a `*` target when running cross-origin under a strict CSP. We
+  // start permissive (`*`) and tighten as soon as we know.
+  var hostOrigin = "*";
+
   function send(msg) {
     dbg("OUT", msg);
-    window.parent.postMessage(msg, "*");
+    try {
+      window.parent.postMessage(msg, hostOrigin);
+    } catch (_) {
+      // Origin became invalid (e.g. host navigated); fall back so we
+      // don't drop the message silently.
+      try { window.parent.postMessage(msg, "*"); } catch (__) { /* give up */ }
+    }
   }
 
   function call(method, params) {
@@ -128,6 +158,13 @@
     dbg("IN", msg);
     if (!msg || typeof msg !== "object") return;
     if (msg.jsonrpc !== "2.0") return;
+    // First inbound JSON-RPC frame carries the host's actual origin —
+    // pin our outbound `postMessage` target to it so subsequent
+    // messages survive strict cross-origin isolation (Inspector).
+    if (hostOrigin === "*" && event.origin && event.origin !== "null") {
+      hostOrigin = event.origin;
+      dbg("HOST_ORIGIN", hostOrigin);
+    }
     if (typeof msg.id !== "undefined" && (msg.result || msg.error)) {
       // Response to one of our requests.
       var p = pending.get(msg.id);
@@ -262,6 +299,16 @@
       }
     }
 
+    // Decide whether the action bar wants any kind of row selection.
+    // The table renderer needs to know up-front so it can prepend the
+    // radio/checkbox column.
+    var actions = pickActions();
+    var wantsSingle = actions.some(function (a) { return a.select === "single"; });
+    var wantsMulti = actions.some(function (a) { return a.select === "multi"; });
+
+    // Reset selection state for every fresh tool-result.
+    selection = { rows: [], selectedIdx: null, multiIdx: new Set() };
+
     if (lastResult.isError) {
       root.innerHTML = '';
       root.appendChild(buildHeader(displayName, "Error"));
@@ -269,15 +316,38 @@
       box.className = "alert";
       box.textContent = stringifyForError(lastResult);
       root.appendChild(box);
-      root.appendChild(buildActions(data));
+      root.appendChild(buildActions(data, actions));
       return;
     }
 
-    var body = pickRenderer(renderer, data);
+    var body = pickRenderer(renderer, data, { wantsSingle: wantsSingle, wantsMulti: wantsMulti, refresh: refreshActionState });
     root.innerHTML = '';
     root.appendChild(buildHeader(displayName, body.subtitle));
     root.appendChild(body.node);
-    root.appendChild(buildActions(data));
+    root.appendChild(buildActions(data, actions));
+  }
+
+  function pickActions() {
+    var meta = (lastResult && lastResult._meta) || {};
+    var ui = meta["io.modelcontextprotocol/ui"] || meta.ui || {};
+    return Array.isArray(ui.actions) ? ui.actions : [];
+  }
+
+  // Re-evaluates which action buttons are enabled given the current
+  // row selection. Wired into the table renderer so radio/checkbox
+  // changes flip buttons live without a full re-render.
+  function refreshActionState() {
+    var btns = document.querySelectorAll("button[data-action-idx]");
+    btns.forEach(function (btn) {
+      var idx = parseInt(btn.getAttribute("data-action-idx"), 10);
+      var actions = pickActions();
+      var a = actions[idx];
+      if (!a) return;
+      var enabled = true;
+      if (a.select === "single") enabled = selection.selectedIdx !== null;
+      else if (a.select === "multi") enabled = selection.multiIdx.size > 0;
+      btn.disabled = !enabled;
+    });
   }
 
   function buildHeader(title, subtitle) {
@@ -296,18 +366,19 @@
     return div;
   }
 
-  function pickRenderer(name, data) {
+  function pickRenderer(name, data, opts) {
+    opts = opts || {};
     if (name && name !== "auto") {
       var fn = renderers[name];
-      if (fn) return fn(data);
+      if (fn) return fn(data, opts);
     }
     if (Array.isArray(data) && data.length && data.every(isPlainObject)) {
-      return renderers.table(data);
+      return renderers.table(data, opts);
     }
     if (isPlainObject(data)) {
-      return renderers.card(data);
+      return renderers.card(data, opts);
     }
-    return renderers.json(data);
+    return renderers.json(data, opts);
   }
 
   function isPlainObject(v) {
@@ -315,14 +386,14 @@
   }
 
   var renderers = {
-    json: function (data) {
+    json: function (data, _opts) {
       var pre = document.createElement("pre");
       pre.className = "json";
       try { pre.textContent = JSON.stringify(data, null, 2); }
       catch (e) { pre.textContent = String(data); }
       return { node: pre, subtitle: "JSON" };
     },
-    card: function (data) {
+    card: function (data, _opts) {
       var card = document.createElement("div");
       card.className = "card";
       var grid = document.createElement("div");
@@ -342,27 +413,91 @@
       card.appendChild(grid);
       return { node: card, subtitle: keys.length + " fields" };
     },
-    table: function (rows) {
+    table: function (rows, opts) {
+      opts = opts || {};
       if (!Array.isArray(rows) || !rows.length) {
         var empty = document.createElement("div");
         empty.className = "empty";
         empty.textContent = "(empty list)";
         return { node: empty, subtitle: "0 rows" };
       }
+      // Stash row data so action handlers can resolve `${field}` / `${rows[].Field}`
+      // against the picked rows without recomputing.
+      selection.rows = rows;
       var columns = collectColumns(rows);
+      var wantsSingle = !!opts.wantsSingle;
+      var wantsMulti = !!opts.wantsMulti;
+      var refresh = typeof opts.refresh === "function" ? opts.refresh : function () {};
       var wrap = document.createElement("div"); wrap.style.overflow = "auto";
       var table = document.createElement("table");
       var thead = document.createElement("thead");
       var hr = document.createElement("tr");
+      if (wantsMulti) {
+        var thAll = document.createElement("th");
+        thAll.className = "select-cell";
+        // Header checkbox: select all / clear all.
+        var allBox = document.createElement("input");
+        allBox.type = "checkbox";
+        allBox.setAttribute("aria-label", "Select all");
+        allBox.addEventListener("change", function () {
+          if (allBox.checked) {
+            selection.multiIdx = new Set(rows.map(function (_, i) { return i; }));
+          } else {
+            selection.multiIdx = new Set();
+          }
+          // Sync row checkboxes.
+          tbody.querySelectorAll("input[type=checkbox][data-row-idx]").forEach(function (b) {
+            var i = parseInt(b.getAttribute("data-row-idx"), 10);
+            b.checked = selection.multiIdx.has(i);
+          });
+          refresh();
+        });
+        thAll.appendChild(allBox);
+        hr.appendChild(thAll);
+      } else if (wantsSingle) {
+        var thR = document.createElement("th");
+        thR.className = "select-cell";
+        thR.textContent = "";
+        hr.appendChild(thR);
+      }
       columns.forEach(function (c) { var th = document.createElement("th"); th.textContent = c; hr.appendChild(th); });
       thead.appendChild(hr); table.appendChild(thead);
       var tbody = document.createElement("tbody");
-      rows.forEach(function (row) {
+      rows.forEach(function (row, rowIdx) {
         var tr = document.createElement("tr");
-        columns.forEach(function (c) {
+        if (wantsMulti) {
           var td = document.createElement("td");
-          td.textContent = formatValue(row && row[c]);
+          td.className = "select-cell";
+          var box = document.createElement("input");
+          box.type = "checkbox";
+          box.setAttribute("data-row-idx", String(rowIdx));
+          box.setAttribute("aria-label", "Select row " + (rowIdx + 1));
+          box.addEventListener("change", function () {
+            if (box.checked) selection.multiIdx.add(rowIdx);
+            else selection.multiIdx.delete(rowIdx);
+            refresh();
+          });
+          td.appendChild(box);
           tr.appendChild(td);
+        } else if (wantsSingle) {
+          var td2 = document.createElement("td");
+          td2.className = "select-cell";
+          var radio = document.createElement("input");
+          radio.type = "radio";
+          radio.name = "mcp-row-select";
+          radio.setAttribute("data-row-idx", String(rowIdx));
+          radio.setAttribute("aria-label", "Select row " + (rowIdx + 1));
+          radio.addEventListener("change", function () {
+            if (radio.checked) selection.selectedIdx = rowIdx;
+            refresh();
+          });
+          td2.appendChild(radio);
+          tr.appendChild(td2);
+        }
+        columns.forEach(function (c) {
+          var cell = document.createElement("td");
+          cell.textContent = formatValue(row && row[c]);
+          tr.appendChild(cell);
         });
         tbody.appendChild(tr);
       });
@@ -370,9 +505,9 @@
       wrap.appendChild(table);
       return { node: wrap, subtitle: rows.length + " row" + (rows.length === 1 ? "" : "s") };
     },
-    form: function (data) {
+    form: function (data, _opts) {
       // Read-only form; submission would need a configured action.
-      var card = renderers.card(data || {});
+      var card = renderers.card(data || {}, _opts);
       card.subtitle = "Form view (read-only)";
       return card;
     }
@@ -411,40 +546,280 @@
   }
 
   // -------------------- actions --------------------
-  function buildActions(currentData) {
-    var meta = (lastResult && lastResult._meta) || {};
-    var ui = meta["io.modelcontextprotocol/ui"] || meta.ui || {};
-    var actions = Array.isArray(ui.actions) ? ui.actions : [];
+  // Action shapes shipped by the policy:
+  //   { tool, label, select: "none"|"single"|"multi",
+  //     mode: "call"|"form",
+  //     arguments?: <pre-resolved object>,
+  //     argsTemplate?: <raw JSON template the bundle resolves
+  //                    against the current row pick> }
+  function buildActions(currentData, actionsArg) {
+    var actions = Array.isArray(actionsArg) ? actionsArg : pickActions();
     var div = document.createElement("div");
     if (!actions.length) return div;
     div.className = "actions";
     actions.forEach(function (a, i) {
       var btn = document.createElement("button");
+      btn.setAttribute("data-action-idx", String(i));
       if (i === 0) btn.classList.add("primary");
       btn.textContent = a.label || a.tool || "Run";
+      // Initial enabled/disabled state based on selection requirements.
+      var sel = a.select || "none";
+      if (sel === "single") btn.disabled = selection.selectedIdx === null;
+      else if (sel === "multi") btn.disabled = selection.multiIdx.size === 0;
       btn.addEventListener("click", function () {
         if (!a.tool) return;
-        btn.disabled = true;
-        var args = a.arguments || {};
-        call("tools/call", { name: a.tool, arguments: args })
-          .then(function (result) {
-            lastResult = result;
-            // The host may also push a separate ui/notifications/tool-result;
-            // either way, render what we have now.
-            render();
-            emitSize();
-          })
-          .catch(function (err) {
-            var alert = document.createElement("div");
-            alert.className = "alert";
-            alert.textContent = (err && err.message) ? err.message : "Tool call failed.";
-            document.getElementById("root").appendChild(alert);
-          })
-          .then(function () { btn.disabled = false; });
+        runAction(a, btn, currentData);
       });
       div.appendChild(btn);
     });
     return div;
+  }
+
+  function runAction(a, btn, currentData) {
+    var sel = a.select || "none";
+    var mode = a.mode || "call";
+    if (mode === "form" && sel === "single") {
+      var idx = selection.selectedIdx;
+      if (idx === null) return;
+      var row = selection.rows[idx] || {};
+      openInlineForm(a, row, btn);
+      return;
+    }
+    var args = resolveActionArgs(a, currentData);
+    fireToolsCall(a, args, btn);
+  }
+
+  // Resolve `${field}` placeholders in an action's arguments.
+  // - select: "none"   → server already substituted; ship a.arguments.
+  // - select: "single" → substitute against the picked row.
+  // - select: "multi"  → support `${rows}` (whole array) and
+  //                       `${rows[].Field}` (project Field across rows).
+  function resolveActionArgs(a, currentData) {
+    var sel = a.select || "none";
+    if (sel === "none") return a.arguments || {};
+    if (sel === "single") {
+      var idx = selection.selectedIdx;
+      var row = idx === null ? {} : (selection.rows[idx] || {});
+      // `${row}` substitutes the whole row object; `${Field}` still
+      // pulls individual values.
+      var ctx = {};
+      Object.keys(row).forEach(function (k) { ctx[k] = row[k]; });
+      ctx.row = row;
+      return substituteValue(a.argsTemplate || a.arguments || {}, ctx);
+    }
+    // multi
+    var picked = [];
+    selection.multiIdx.forEach(function (i) { picked.push(selection.rows[i]); });
+    return substituteMulti(a.argsTemplate || a.arguments || {}, picked);
+  }
+
+  function substituteValue(node, ctx) {
+    if (typeof node === "string") return substituteString(node, ctx);
+    if (Array.isArray(node)) return node.map(function (v) { return substituteValue(v, ctx); });
+    if (node && typeof node === "object") {
+      var out = {};
+      Object.keys(node).forEach(function (k) { out[k] = substituteValue(node[k], ctx); });
+      return out;
+    }
+    return node;
+  }
+
+  function substituteString(s, ctx) {
+    // If the entire string is a single `${expr}`, return the raw value
+    // (so numbers stay numbers, objects stay objects). Otherwise do an
+    // in-string substitution with stringified values.
+    var whole = /^\$\{([^}]+)\}$/.exec(s);
+    if (whole) {
+      var v = lookupSingle(ctx, whole[1]);
+      return v === undefined ? s : v;
+    }
+    return s.replace(/\$\{([^}]+)\}/g, function (m, key) {
+      var v = lookupSingle(ctx, key);
+      if (v === undefined) return m;
+      if (v === null) return "";
+      if (typeof v === "object") { try { return JSON.stringify(v); } catch (_) { return String(v); } }
+      return String(v);
+    });
+  }
+
+  function lookupSingle(ctx, dotted) {
+    if (ctx == null) return undefined;
+    var cur = ctx;
+    var parts = dotted.split(".");
+    for (var i = 0; i < parts.length; i++) {
+      if (cur == null) return undefined;
+      cur = cur[parts[i]];
+    }
+    return cur;
+  }
+
+  // Multi-row substitution. Supports:
+  //  - `${rows}`             → the entire array of selected rows.
+  //  - `${rows[].Field}`     → array projecting `Field` across rows.
+  //  - any other `${field}`  → resolved against the *first* selected
+  //                            row (best-effort; pick a different shape
+  //                            if your tool actually wants a join).
+  function substituteMulti(node, rows) {
+    if (typeof node === "string") {
+      var whole = /^\$\{([^}]+)\}$/.exec(node);
+      if (whole) {
+        var key = whole[1];
+        if (key === "rows") return rows;
+        var proj = /^rows\[\]\.(.+)$/.exec(key);
+        if (proj) {
+          var field = proj[1];
+          return rows.map(function (r) { return r ? r[field] : undefined; });
+        }
+        return substituteString(node, rows[0] || {});
+      }
+      return substituteString(node, rows[0] || {});
+    }
+    if (Array.isArray(node)) return node.map(function (v) { return substituteMulti(v, rows); });
+    if (node && typeof node === "object") {
+      var out = {};
+      Object.keys(node).forEach(function (k) { out[k] = substituteMulti(node[k], rows); });
+      return out;
+    }
+    return node;
+  }
+
+  // Open a modal-ish inline form built from the selected row's keys.
+  // System fields (`Id`, …) are passed through unchanged but hidden so
+  // operators don't accidentally edit immutable identifiers.
+  var SYSTEM_FIELDS = ["Id", "id", "_id", "createdAt", "updatedAt", "CreatedAt", "UpdatedAt", "createdDate", "lastModifiedDate"];
+
+  function openInlineForm(action, row, originBtn) {
+    // Snapshot existing values, hide system fields, expose editables.
+    var passthroughEntries = [];
+    var editableKeys = [];
+    Object.keys(row || {}).forEach(function (k) {
+      if (SYSTEM_FIELDS.indexOf(k) !== -1) {
+        passthroughEntries.push([k, row[k]]);
+        return;
+      }
+      editableKeys.push(k);
+    });
+
+    var overlay = document.createElement("div");
+    overlay.className = "form-overlay";
+    var card = document.createElement("div");
+    card.className = "form-card";
+    var h = document.createElement("h3");
+    h.textContent = action.label || action.tool || "Edit";
+    card.appendChild(h);
+
+    var inputs = {};
+    editableKeys.forEach(function (k) {
+      var rowEl = document.createElement("div");
+      rowEl.className = "form-row";
+      var label = document.createElement("label");
+      label.textContent = k;
+      rowEl.appendChild(label);
+      var v = row[k];
+      var input;
+      if (typeof v === "object" && v !== null) {
+        input = document.createElement("textarea");
+        try { input.value = JSON.stringify(v, null, 2); }
+        catch (_) { input.value = String(v); }
+        input.setAttribute("data-type", "json");
+      } else if (typeof v === "boolean") {
+        input = document.createElement("input");
+        input.type = "checkbox";
+        input.checked = !!v;
+        input.setAttribute("data-type", "boolean");
+      } else if (typeof v === "number") {
+        input = document.createElement("input");
+        input.type = "number";
+        input.value = String(v);
+        input.setAttribute("data-type", "number");
+      } else {
+        input = document.createElement("input");
+        input.type = "text";
+        input.value = v == null ? "" : String(v);
+        input.setAttribute("data-type", "string");
+      }
+      rowEl.appendChild(input);
+      inputs[k] = input;
+      card.appendChild(rowEl);
+    });
+
+    var formActions = document.createElement("div");
+    formActions.className = "form-actions";
+    var cancel = document.createElement("button");
+    cancel.textContent = "Cancel";
+    cancel.addEventListener("click", function () { document.body.removeChild(overlay); });
+    var submit = document.createElement("button");
+    submit.classList.add("primary");
+    submit.textContent = action.label || "Save";
+    submit.addEventListener("click", function () {
+      // Reconstruct the row with edits, then build args. If the action
+      // ships an `argsTemplate`, render it against the edited row;
+      // otherwise pass the merged row directly.
+      var edited = {};
+      passthroughEntries.forEach(function (p) { edited[p[0]] = p[1]; });
+      Object.keys(inputs).forEach(function (k) {
+        var inp = inputs[k];
+        var t = inp.getAttribute("data-type");
+        if (t === "boolean") edited[k] = !!inp.checked;
+        else if (t === "number") {
+          var n = Number(inp.value);
+          edited[k] = isNaN(n) ? inp.value : n;
+        }
+        else if (t === "json") {
+          try { edited[k] = JSON.parse(inp.value); }
+          catch (_) { edited[k] = inp.value; }
+        }
+        else edited[k] = inp.value;
+      });
+      var args;
+      if (action.argsTemplate) {
+        // Make `${row}` resolve to the whole edited row, while still
+        // letting field-level placeholders (`${Id}`, `${Name}`, …)
+        // pull individual values. We layer `row` on top of `edited`
+        // so a literal column named `row` is shadowed (rare).
+        var ctx = {};
+        Object.keys(edited).forEach(function (k) { ctx[k] = edited[k]; });
+        ctx.row = edited;
+        args = substituteValue(action.argsTemplate, ctx);
+      } else {
+        args = edited;
+      }
+      submit.disabled = true;
+      cancel.disabled = true;
+      fireToolsCall(action, args, originBtn).then(function () {
+        if (overlay.parentNode) document.body.removeChild(overlay);
+      }).catch(function () {
+        // Leave the form open so the user can retry/edit.
+        submit.disabled = false;
+        cancel.disabled = false;
+      });
+    });
+    formActions.appendChild(cancel);
+    formActions.appendChild(submit);
+    card.appendChild(formActions);
+    overlay.appendChild(card);
+    document.body.appendChild(overlay);
+    emitSize();
+  }
+
+  function fireToolsCall(action, args, btn) {
+    if (btn) btn.disabled = true;
+    return call("tools/call", { name: action.tool, arguments: args || {} })
+      .then(function (result) {
+        lastResult = result;
+        render();
+        emitSize();
+      })
+      .catch(function (err) {
+        var alert = document.createElement("div");
+        alert.className = "alert";
+        alert.textContent = (err && err.message) ? err.message : "Tool call failed.";
+        document.getElementById("root").appendChild(alert);
+        throw err;
+      })
+      .then(function (out) { if (btn) btn.disabled = false; return out; }, function (err) {
+        if (btn) btn.disabled = false; throw err;
+      });
   }
 })();
 </script>

@@ -115,6 +115,56 @@ spec:
                     to wire a submit button to a tool).
 
     # ------------------------------------------------------------------
+    # CSP / domain (MCP Apps spec, ChatGPT-required)
+    # ------------------------------------------------------------------
+    csp:
+      type: object
+      default: {}
+      description: |
+        Default CSP allowlists emitted as `_meta.ui.csp` on every
+        appified tool. ChatGPT's app-submission validator rejects
+        templates without a CSP block; Claude.ai ignores the field
+        when not relevant. Spec shape (SEP-1865 / Apps docs):
+        `connectDomains`, `resourceDomains`, `frameDomains`,
+        `baseUriDomains`. Each entry is a host or origin string
+        (e.g. `https://api.salesforce.com`). Empty arrays are valid
+        and tell the host "no extra domains needed beyond the host
+        defaults".
+      properties:
+        connectDomains:
+          type: array
+          default: []
+          items:
+            type: string
+        resourceDomains:
+          type: array
+          default: []
+          items:
+            type: string
+        frameDomains:
+          type: array
+          default: []
+          items:
+            type: string
+        baseUriDomains:
+          type: array
+          default: []
+          items:
+            type: string
+    domain:
+      type: string
+      default: ""
+      description: |
+        Default `_meta.ui.domain` for every appified tool. ChatGPT
+        requires a *unique* domain per template; if this is empty the
+        policy synthesises `<toolName>.mcp-apps-policy.local` per
+        tool, which satisfies the validator without any extra config.
+        Override here when the bundle needs a stable origin the
+        upstream API server can allowlist (the doc-recommended path
+        is to use the SHA-256-keyed `*.claudemcpcontent.com` form for
+        Claude, or whatever the host documents).
+
+    # ------------------------------------------------------------------
     # Per-tool overrides
     # ------------------------------------------------------------------
     tools:
@@ -147,6 +197,42 @@ spec:
               Set to false to exclude this tool from app advertisement
               (it will not get `_meta.ui` and will not appear in
               `resources/list`). Useful for internal admin tools.
+          domain:
+            type: string
+            default: ""
+            description: |
+              Per-tool override for `_meta.ui.domain`. Falls back to
+              the top-level `domain`, then to a synthesised
+              `<toolName>.mcp-apps-policy.local`.
+          csp:
+            type: object
+            default: {}
+            description: |
+              Per-tool override for `_meta.ui.csp`. Same shape as the
+              top-level `csp`. When set, replaces the global default
+              entirely (no array merging) so an operator can declare
+              tighter or looser allowlists for a specific tool.
+            properties:
+              connectDomains:
+                type: array
+                default: []
+                items:
+                  type: string
+              resourceDomains:
+                type: array
+                default: []
+                items:
+                  type: string
+              frameDomains:
+                type: array
+                default: []
+                items:
+                  type: string
+              baseUriDomains:
+                type: array
+                default: []
+                items:
+                  type: string
           actions:
             type: array
             default: []
@@ -169,16 +255,55 @@ spec:
                 label:
                   type: string
                   description: Button label.
+                select:
+                  type: string
+                  enum:
+                    - none
+                    - single
+                    - multi
+                  default: none
+                  description: |
+                    Row selection requirement.
+                    - `none`   : action always enabled; `${field}`
+                                 substitutes from top-level
+                                 `structuredContent`.
+                    - `single` : table renders a leading radio column;
+                                 button is disabled until a row is
+                                 selected. `${field}` substitutes from
+                                 the selected row.
+                    - `multi`  : table renders a leading checkbox
+                                 column; button enabled when ≥ 1 row
+                                 is selected. `${rows}` is the array
+                                 of selected rows; `${rows[].Field}`
+                                 projects `Field` across them.
+                mode:
+                  type: string
+                  enum:
+                    - call
+                    - form
+                  default: call
+                  description: |
+                    What clicking the button does.
+                    - `call` : issue `tools/call` immediately with the
+                               substituted arguments.
+                    - `form` : open an inline form built from the
+                               selected row's keys, let the user edit,
+                               then submit. System fields (`Id` and a
+                               small denylist) are hidden but passed
+                               through unchanged. Only meaningful
+                               with `select: single`.
                 argsTemplate:
                   type: string
                   default: ""
                   description: |
-                    Optional JSON template applied to the current
-                    result before issuing the next call. `${field}`
-                    placeholders inside string values are replaced
-                    with values from the current result's
-                    `structuredContent`. Example:
-                    `{"sku": "${sku}"}`.
+                    Optional JSON template applied at click time.
+                    `${field}` placeholders inside string values are
+                    replaced. With `select: none` the substitution
+                    happens server-side against `structuredContent`
+                    (legacy behaviour, kept for back-compat). With
+                    `select: single|multi` the raw template ships to
+                    the bundle and substitution happens client-side
+                    against the selection.
 
     # ------------------------------------------------------------------
     # Default actions (apply to every tool)
@@ -200,6 +325,19 @@ spec:
             type: string
           label:
             type: string
+          select:
+            type: string
+            enum:
+              - none
+              - single
+              - multi
+            default: none
+          mode:
+            type: string
+            enum:
+              - call
+              - form
+            default: call
           argsTemplate:
             type: string
             default: ""

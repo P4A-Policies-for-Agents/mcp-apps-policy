@@ -23,7 +23,7 @@
 
 use serde_json::{json, Value};
 
-use crate::config::{Action, PolicyConfig, RendererRef};
+use crate::config::{Action, ActionMode, PolicyConfig, RendererRef, SelectMode};
 
 pub mod sse;
 
@@ -155,9 +155,14 @@ fn annotate_tools(tools: &mut [Value], cfg: &PolicyConfig) {
         // `_meta.ui` (informal alias used by Inspector / our bundle)
         // and `_meta["io.modelcontextprotocol/ui"]` (the SEP-1865
         // spec-namespaced key Claude.ai's host requires).
+        // `csp` + `domain` are required by ChatGPT's app-submission
+        // validator and ignored by Claude.ai (additive — safe to send
+        // to both).
         let mut ui = json!({
             "resourceUri": synthesize_ui_uri(&name),
             "visibility": ["model", "app"],
+            "domain": cfg.domain_for(&name),
+            "csp": cfg.csp_for(&name).to_meta(),
         });
         // If the upstream already shipped MCP Apps metadata, prefer
         // its values — merge ours underneath without clobbering.
@@ -280,6 +285,15 @@ fn apply_to_tool_call_result(
                         ui_map
                             .entry("resourceUri".to_string())
                             .or_insert_with(|| Value::String(synthesize_ui_uri(t)));
+                        // CSP + domain mirror the tools/list annotation
+                        // path so app-aware hosts see the same template
+                        // metadata on every result frame.
+                        ui_map
+                            .entry("domain".to_string())
+                            .or_insert_with(|| Value::String(cfg.domain_for(t)));
+                        ui_map
+                            .entry("csp".to_string())
+                            .or_insert_with(|| cfg.csp_for(t).to_meta());
                     }
                     let renderer_label = match tool_name.as_deref() {
                         Some(t) => match cfg.renderer_for(t) {
@@ -353,17 +367,57 @@ fn ensure_structured_content(result: &mut Value) -> bool {
     true
 }
 
-/// Render an `_meta.ui.actions[]` entry with placeholders resolved.
+/// Render an `_meta.ui.actions[]` entry. The shape sent to the bundle
+/// depends on the action's `select` mode:
+///
+/// - `none`   : substitute `${field}` placeholders server-side against
+///              `structuredContent` and ship resolved `arguments` (legacy
+///              behaviour kept for back-compat).
+/// - `single` : ship the raw template + a `select` hint so the bundle
+///              renders a radio-column table and substitutes against
+///              the user's selected row at click time.
+/// - `multi`  : same as `single` but with a checkbox column and
+///              array-projection support (`${rows}`, `${rows[].Field}`).
 fn resolve_action(action: &Action, ctx: &Value) -> Value {
     let mut out = json!({
         "tool": action.tool,
         "label": action.label,
     });
-    if let Some(template) = &action.args_template {
-        let resolved = resolve_template(template, ctx);
-        if let Some(map) = out.as_object_mut() {
-            map.insert("arguments".to_string(), resolved);
+    let map = out.as_object_mut().expect("just constructed object");
+
+    // Always ship `select` and `mode` so the bundle can decide which UI
+    // affordance to render. `none`/`call` are the defaults so the bundle
+    // can ignore them; sending the explicit value is harmless and makes
+    // the contract obvious in `_meta.ui.actions[]` payloads.
+    map.insert("select".to_string(), Value::String(action.select.as_str().to_string()));
+    map.insert("mode".to_string(), Value::String(action.mode.as_str().to_string()));
+
+    match action.select {
+        SelectMode::None => {
+            // Legacy server-side substitution against the top-level
+            // structuredContent. `${field}` not present → placeholder
+            // ships through unchanged.
+            if let Some(template) = &action.args_template {
+                let resolved = resolve_template(template, ctx);
+                map.insert("arguments".to_string(), resolved);
+            }
         }
+        SelectMode::Single | SelectMode::Multi => {
+            // Substitution must happen against the user's row pick.
+            // Ship the raw template through; the bundle will fill it
+            // out client-side. We deliberately don't ship `arguments`
+            // pre-filled — without a row selection there's nothing to
+            // resolve against.
+            if let Some(template) = &action.args_template {
+                map.insert("argsTemplate".to_string(), template.clone());
+            }
+        }
+    }
+    if matches!(action.mode, ActionMode::Form) {
+        // Hint the bundle to open an inline edit form built from the
+        // selected row's keys, rather than firing the call straight
+        // away.
+        map.insert("mode".to_string(), Value::String("form".to_string()));
     }
     out
 }
@@ -536,6 +590,8 @@ mod tests {
             default_actions: None,
             deny_tools: None,
             custom_bundles: None,
+            csp: None,
+            domain: None,
             preview_mode: None,
             debug_headers: None,
             max_body_bytes: None,
@@ -645,7 +701,11 @@ mod tests {
                     tool: "create_order".into(),
                     label: "Order".into(),
                     args_template: Some("{\"sku\":\"${sku}\"}".into()),
+                    select: None,
+                    mode: None,
                 }]),
+                csp: None,
+                domain: None,
             }]),
             ..raw_empty()
         })
@@ -666,6 +726,124 @@ mod tests {
             spec["resourceUri"].as_str().unwrap(),
             synthesize_ui_uri("get_inventory")
         );
+    }
+
+    #[test]
+    fn emits_default_csp_and_synthesised_domain_on_tools_list() {
+        // ChatGPT's app-submission validator requires both `_meta.ui.csp`
+        // and `_meta.ui.domain` per template; missing either marks the
+        // template as "Not yet submittable for review".
+        let cfg = cfg_default();
+        let mut body = json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "result": {"tools": [{"name": "get_inventory"}]}
+        });
+        rewrite_response(&cfg, &mut body, None);
+        let ui = &body["result"]["tools"][0]["_meta"]["ui"];
+        // Empty allowlists are valid CSP per the spec; the *presence*
+        // of the block is what ChatGPT keys on.
+        assert!(ui["csp"].is_object());
+        assert_eq!(ui["csp"]["connectDomains"], json!([]));
+        assert_eq!(ui["csp"]["resourceDomains"], json!([]));
+        assert_eq!(ui["csp"]["frameDomains"], json!([]));
+        assert_eq!(ui["csp"]["baseUriDomains"], json!([]));
+        assert_eq!(
+            ui["domain"].as_str().unwrap(),
+            "get-inventory.mcp-apps-policy.local"
+        );
+    }
+
+    #[test]
+    fn per_tool_csp_and_domain_override_global() {
+        let cfg = PolicyConfig::from_raw(&RawConfig {
+            csp: Some(crate::generated::config::CspConfig {
+                connect_domains: Some(vec!["api.example.com".into()]),
+                resource_domains: None,
+                frame_domains: None,
+                base_uri_domains: None,
+            }),
+            domain: Some("global.example.com".into()),
+            tools: Some(vec![crate::generated::config::Tools0Config {
+                name: "special".into(),
+                renderer: None,
+                appify: None,
+                actions: None,
+                csp: Some(crate::generated::config::Csp1Config {
+                    connect_domains: Some(vec!["special.example.com".into()]),
+                    resource_domains: None,
+                    frame_domains: None,
+                    base_uri_domains: None,
+                }),
+                domain: Some("special.example.com".into()),
+            }]),
+            ..raw_empty()
+        })
+        .unwrap();
+        let mut body = json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "result": {
+                "tools": [
+                    {"name": "default_tool"},
+                    {"name": "special"}
+                ]
+            }
+        });
+        rewrite_response(&cfg, &mut body, None);
+        let default_ui = &body["result"]["tools"][0]["_meta"]["ui"];
+        assert_eq!(
+            default_ui["csp"]["connectDomains"],
+            json!(["api.example.com"])
+        );
+        assert_eq!(default_ui["domain"], "global.example.com");
+        let special_ui = &body["result"]["tools"][1]["_meta"]["ui"];
+        assert_eq!(
+            special_ui["csp"]["connectDomains"],
+            json!(["special.example.com"])
+        );
+        assert_eq!(special_ui["domain"], "special.example.com");
+    }
+
+    #[test]
+    fn tool_call_result_carries_csp_and_domain() {
+        let cfg = cfg_default();
+        let mut body = json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "result": {
+                "content": [{"type": "text", "text": "{\"sku\":\"A1\"}"}]
+            }
+        });
+        rewrite_response(&cfg, &mut body, Some("get_inventory"));
+        // No actions configured by default → no _meta.ui injected by the
+        // result path; rely on tools/list for csp+domain there. Add a
+        // default action so the result path runs.
+        let cfg = PolicyConfig::from_raw(&RawConfig {
+            default_actions: Some(vec![crate::generated::config::DefaultActions0Config {
+                tool: "noop".into(),
+                label: "Back".into(),
+                args_template: None,
+                select: None,
+                mode: None,
+            }]),
+            ..raw_empty()
+        })
+        .unwrap();
+        let mut body = json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "result": {
+                "content": [{"type": "text", "text": "{\"sku\":\"A1\"}"}]
+            }
+        });
+        rewrite_response(&cfg, &mut body, Some("get_inventory"));
+        let ui = &body["result"]["_meta"]["ui"];
+        assert_eq!(
+            ui["domain"].as_str().unwrap(),
+            "get-inventory.mcp-apps-policy.local"
+        );
+        assert!(ui["csp"].is_object());
     }
 
     #[test]
@@ -762,7 +940,11 @@ mod tests {
                     tool: "create_order".into(),
                     label: "Order".into(),
                     args_template: Some("{\"sku\":\"${sku}\"}".into()),
+                    select: None,
+                    mode: None,
                 }]),
+                csp: None,
+                domain: None,
             }]),
             ..raw_empty()
         })
@@ -798,7 +980,11 @@ mod tests {
                     tool: "create_order".into(),
                     label: "Order".into(),
                     args_template: Some("{\"sku\":\"${sku}\"}".into()),
+                    select: None,
+                    mode: None,
                 }]),
+                csp: None,
+                domain: None,
             }]),
             ..raw_empty()
         })
@@ -827,6 +1013,8 @@ mod tests {
                 renderer: None,
                 appify: None,
                 actions: None,
+                csp: None,
+                domain: None,
             }]),
             ..raw_empty()
         })
@@ -858,6 +1046,8 @@ mod tests {
                 renderer: None,
                 appify: None,
                 actions: None,
+                csp: None,
+                domain: None,
             }]),
             ..raw_empty()
         })
@@ -884,6 +1074,8 @@ mod tests {
             default_actions: None,
             deny_tools: None,
             custom_bundles: None,
+            csp: None,
+            domain: None,
             preview_mode: None,
             debug_headers: None,
             max_body_bytes: None,

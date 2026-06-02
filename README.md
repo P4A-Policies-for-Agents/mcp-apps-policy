@@ -120,7 +120,9 @@ The policy only modifies *responses* (and the synthesised
 | `appifyResponses` | bool | `true` | (b) Normalise `tools/call` results: copy JSON-bearing `content[0].text` into `result.structuredContent` so the iframe has a clean structured value to render. |
 | `appifyActions` | bool | `true` | (c) Inject suggested next-tool actions into `result._meta.ui.actions` based on the matching `tools[]` / `defaultActions` entries. |
 | `renderer` | enum | `auto` | Default renderer for the embedded bundle: `auto` \| `json` \| `table` \| `card` \| `form`. |
-| `tools[]` | array | `[]` | Per-tool overrides — renderer, appify on/off, and actions. |
+| `csp` | object | `{}` | Default CSP allowlists emitted as `_meta.ui.csp` on every appified tool. Shape: `{connectDomains[], resourceDomains[], frameDomains[], baseUriDomains[]}`. ChatGPT's app-submission validator rejects templates without a CSP block; Claude.ai ignores the field. |
+| `domain` | string | `""` | Default `_meta.ui.domain` for every appified tool. Empty string synthesises `<toolName>.mcp-apps-policy.local` per tool, which satisfies ChatGPT's "unique domain per template" requirement out of the box. |
+| `tools[]` | array | `[]` | Per-tool overrides — renderer, appify on/off, actions, plus `csp` / `domain` overrides for hosts that need stable, tool-specific origins. |
 | `defaultActions[]` | array | `[]` | Actions appended to every tool's button row when `appifyActions` is on. |
 | `denyTools[]` | array | `[]` | Tool names that must never be appified, advertised, or targeted by an action. Takes precedence over everything else. |
 | `customBundles[]` | array | `[]` | Inline HTML bundles served for specific tools (per-tool `renderer: <name>`). |
@@ -135,11 +137,29 @@ The policy only modifies *responses* (and the synthesised
   "name": "get_inventory",
   "renderer": "card",
   "appify": true,
+  "domain": "inventory.example.com",
+  "csp": {
+    "connectDomains": ["api.example.com"],
+    "resourceDomains": []
+  },
   "actions": [
     {
       "tool": "create_order",
       "label": "Order",
       "argsTemplate": "{\"sku\":\"${sku}\"}"
+    },
+    {
+      "tool": "update_accounts",
+      "label": "Edit",
+      "select": "single",
+      "mode": "form",
+      "argsTemplate": "{\"accounts\":[\"${row}\"]}"
+    },
+    {
+      "tool": "delete_accounts",
+      "label": "Delete",
+      "select": "multi",
+      "argsTemplate": "{\"Ids\":\"${rows[].Id}\"}"
     }
   ]
 }
@@ -148,10 +168,27 @@ The policy only modifies *responses* (and the synthesised
 - `renderer` — built-in name (`auto`/`json`/`table`/`card`/`form`) or
   the `name` of a `customBundles[]` entry.
 - `appify: false` excludes the tool from app advertisement entirely.
-- `actions[].argsTemplate` is a JSON string with `${field}`
-  placeholders. At click time the embedded bundle reads each
-  placeholder from the *current* result's `structuredContent` and
-  substitutes the value before issuing `tools/call`.
+- `domain` / `csp` — per-tool overrides for the spec's required
+  `_meta.ui.domain` / `_meta.ui.csp` blocks. When omitted, the
+  policy falls back to the global defaults; when those are also
+  empty, `domain` is synthesised as `<toolName>.mcp-apps-policy.local`
+  and `csp` ships as four empty arrays.
+- `actions[].select` — row-selection requirement: `none` (default),
+  `single` (radio column, button disabled until a row is picked), or
+  `multi` (checkbox column, enabled when ≥ 1 row is checked).
+- `actions[].mode` — `call` (default; fire `tools/call` immediately)
+  or `form` (open an inline edit form built from the selected row,
+  let the user edit, then submit). `form` requires `select: single`.
+- `actions[].argsTemplate` is a JSON string with placeholders the
+  bundle resolves at click time. With `select: none` the substitution
+  happens server-side against `structuredContent` (legacy). With
+  `select: single|multi` it happens client-side against the user's
+  pick:
+  - `${field}` — read a key off the selected row.
+  - `${row}` — the entire selected row object.
+  - `${rows}` — the array of selected rows (multi only).
+  - `${rows[].Field}` — project `Field` across the selected rows
+    (multi only).
 
 ### Resource URI scheme
 
@@ -277,7 +314,7 @@ curl -s http://localhost:8081/mcp \
 curl -s http://localhost:8081/mcp \
   -H 'Content-Type: application/json' \
   -d '{"jsonrpc":"2.0","id":2,"method":"resources/read",
-       "params":{"uri":"ui://mcp-apps-policy/v0.1.9/get_inventory"}}' | jq
+       "params":{"uri":"ui://mcp-apps-policy/v0.1.11/get_inventory"}}' | jq
 ```
 
 ---
@@ -400,6 +437,9 @@ during rollout.
 | Iframe loads but stays empty / "Waiting for tool result…" | Host gates `tool-result` pushes on a successful `ui/initialize`, or on a non-zero `size-changed` report. Turn on `previewMode: true` to enable the in-iframe debug overlay (`<meta name="x-mcp-debug">`); it logs every postMessage and surfaces handshake errors. |
 | Iframe renders an *old* bundle / `ui/initialize` is rejected with a field name (e.g. `appInfo`) the current source no longer uses | Host's sandbox proxy cached the previous bundle by URI. Bump the policy version — the `v<version>` segment in `ui://mcp-apps-policy/v<version>/<tool>` will change and the proxy will refetch. |
 | Claude.ai logs *"Tool X has no UI resource (no ui/resourceUri in tool._meta)"* even though `_meta.ui.resourceUri` is set | Strict SEP-1865 hosts only read `_meta["io.modelcontextprotocol/ui"]` (the spec-namespaced key) and ignore the `_meta.ui` alias. As of 0.1.10 the policy emits both. Upgrade to ≥ 0.1.10 and re-apply. |
+| ChatGPT shows *"Widget CSP is not set for this template. A CSP is required for app submission"* and/or *"Widget domain is not set for this template. A unique domain is required for app submission"* | The host requires `_meta.ui.csp` and `_meta.ui.domain` per template. As of 0.1.11 the policy emits both — empty allowlists for CSP, and a synthesised `<toolName>.mcp-apps-policy.local` domain when not explicitly set. Upgrade to ≥ 0.1.11 and re-apply, or set `csp` / `domain` (global or per-tool) for stable values. |
+| Edit / Delete buttons appear in a table but do nothing useful | Pre-0.1.11 actions resolved `${field}` against the *top-level* `structuredContent` and never the picked row, so list-shaped tools (e.g. `get_accounts`) shipped empty `Id`s. As of 0.1.11, actions can declare `select: single` / `select: multi` and the bundle renders a radio/checkbox column; `${field}`, `${row}`, `${rows}`, and `${rows[].Field}` resolve against the user's pick at click time. `mode: form` opens an inline edit form for the selected row and submits the edits as `tools/call` arguments. |
+| MCP Inspector iframe never sees `tool-result` | Pre-0.1.11 the bundle posted with `targetOrigin: "*"` which Inspector's strict CSP can drop. As of 0.1.11 the bundle pins `targetOrigin` to the host's origin captured from the first inbound message. |
 | Action button arguments are empty | `argsTemplate` references a `${field}` not present in `structuredContent` | Inspect the tool's `result.structuredContent` and align the template. |
 | `resources/read` for a `ui://` URI hits the upstream | Policy load order / wrong policy ref | Check `anypoint-cli-v4 api-mgr policy list` shows `mcp-apps-policy` applied. |
 | `Cannot process message because this session hasn't been initialized yet` | Upstream uses Streamable HTTP and requires an `initialize` handshake first | Issue an MCP `initialize`, capture the `mcp-session-id` response header, send it on subsequent calls. |

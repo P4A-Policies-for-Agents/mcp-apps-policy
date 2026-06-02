@@ -100,6 +100,34 @@ bundle so the policy works without external hosting.
   fully-qualified key, while the alias kept relaxed hosts working.
   Dual-write covers both groups without forcing operators to pick.
   The embedded bundle reads whichever shape is present.
+- **CSP + domain emission (0.1.11).** Every appified tool now carries
+  `_meta.ui.csp = {connectDomains, resourceDomains, frameDomains,
+  baseUriDomains}` and `_meta.ui.domain` (synthesised from the tool
+  name when not configured). ChatGPT's app-submission validator
+  rejects templates without these — *"Widget CSP is not set for this
+  template"* and *"Widget domain is not set for this template"*.
+  Both fields are configurable globally (`csp`, `domain`) and
+  per-tool (`tools[].csp`, `tools[].domain`); per-tool replaces
+  global entirely. Claude.ai ignores the new fields, so the change
+  is purely additive on that host.
+- **Working table actions (0.1.11).** Actions now have `select`
+  (`none`/`single`/`multi`) and `mode` (`call`/`form`) attributes.
+  The embedded bundle renders a radio column for `select: single`
+  and a checkbox column for `select: multi`; action buttons are
+  disabled until the requirement is met. Substitution moved
+  client-side for selection-bound actions: `${field}` reads from
+  the picked row, `${row}` is the whole row, `${rows}` is the
+  selected array, and `${rows[].Field}` projects a field across
+  rows. `mode: form` (single-select only) opens an inline edit form
+  built from the row's keys, hides system fields (`Id`, timestamps),
+  and submits the edited row as `tools/call` arguments. Closes the
+  long-standing gap where Edit / Delete buttons fired with empty
+  `Id`s because substitution happened against the top-level result.
+- **Inspector compatibility (0.1.11).** The bundle now captures the
+  host's origin from the first inbound JSON-RPC frame and pins
+  `postMessage` `targetOrigin` to it. Pre-0.1.11 we sent every
+  message with `targetOrigin: "*"`, which MCP Inspector's strict
+  cross-origin isolation could drop.
 
 **Known gaps**
 

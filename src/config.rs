@@ -9,7 +9,8 @@ use std::collections::{HashMap, HashSet};
 use serde::{Deserialize, Serialize};
 
 use crate::generated::config::{
-    Actions0Config, Config, Csp1Config, CustomBundles0Config, DefaultActions0Config, Tools0Config,
+    Actions0Config, Config, Csp1Config, CspConfig, CustomBundles0Config, DefaultActions0Config,
+    Tools0Config,
 };
 
 #[derive(Debug, thiserror::Error)]
@@ -65,32 +66,88 @@ pub enum RendererRef {
     Custom(String),
 }
 
+/// Row-selection requirement for an action button. `None` means the
+/// action operates on the top-level result; `Single` requires a radio
+/// pick; `Multi` requires ≥ 1 checked rows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SelectMode {
+    None,
+    Single,
+    Multi,
+}
+
+impl SelectMode {
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.trim() {
+            "" | "none" => Some(Self::None),
+            "single" => Some(Self::Single),
+            "multi" => Some(Self::Multi),
+            _ => None,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::Single => "single",
+            Self::Multi => "multi",
+        }
+    }
+}
+
+/// What clicking the button does. `Call` issues a `tools/call`
+/// directly; `Form` opens an inline edit form.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ActionMode {
+    Call,
+    Form,
+}
+
+impl ActionMode {
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.trim() {
+            "" | "call" => Some(Self::Call),
+            "form" => Some(Self::Form),
+            _ => None,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Call => "call",
+            Self::Form => "form",
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct Action {
     pub tool: String,
     pub label: String,
-    /// Stored as a parsed JSON value (validated to be JSON at config
-    /// load) so we don't re-parse on every response. `None` means
-    /// "no template — call the tool with empty args".
+    /// Parsed JSON template. `None` = "call the tool with empty args".
+    /// For `select == None` the policy substitutes `${field}` against
+    /// `structuredContent` server-side at response time. For
+    /// `single`/`multi` the template ships through to the bundle as-is
+    /// so substitution can happen against the user's row selection.
     pub args_template: Option<serde_json::Value>,
+    pub select: SelectMode,
+    pub mode: ActionMode,
 }
 
-#[derive(Debug, Clone)]
-pub struct ToolOverride {
-    pub renderer: Option<RendererRef>,
-    pub appify: bool,
-    pub actions: Vec<Action>,
-}
-
-#[derive(Debug, Clone)]
-pub struct CustomBundleCsp {
+/// CSP allowlists emitted as `_meta.ui.csp`. Same shape used at the
+/// policy level, per-tool, and on `customBundles[]`. Empty arrays are
+/// valid — they tell the host "no extra origins beyond defaults".
+#[derive(Debug, Clone, Default)]
+pub struct CspBlock {
     pub connect_domains: Vec<String>,
     pub resource_domains: Vec<String>,
     pub frame_domains: Vec<String>,
     pub base_uri_domains: Vec<String>,
 }
 
-impl CustomBundleCsp {
+impl CspBlock {
     pub fn is_empty(&self) -> bool {
         self.connect_domains.is_empty()
             && self.resource_domains.is_empty()
@@ -108,11 +165,28 @@ impl CustomBundleCsp {
     }
 }
 
+/// Back-compat alias — `bundle::html_for` and earlier code refer to
+/// `CustomBundleCsp`.
+pub type CustomBundleCsp = CspBlock;
+
+#[derive(Debug, Clone)]
+pub struct ToolOverride {
+    pub renderer: Option<RendererRef>,
+    pub appify: bool,
+    pub actions: Vec<Action>,
+    /// Per-tool `_meta.ui.domain`. `None` means "fall back to the
+    /// global default, then to a synthesised
+    /// `<toolName>.mcp-apps-policy.local`."
+    pub domain: Option<String>,
+    /// Per-tool CSP. `None` means "use the global default".
+    pub csp: Option<CspBlock>,
+}
+
 #[derive(Debug, Clone)]
 pub struct CustomBundle {
     pub name: String,
     pub html: String,
-    pub csp: CustomBundleCsp,
+    pub csp: CspBlock,
 }
 
 #[derive(Debug, Clone)]
@@ -125,6 +199,12 @@ pub struct PolicyConfig {
     pub default_actions: Vec<Action>,
     pub deny_tools: HashSet<String>,
     pub custom_bundles: HashMap<String, CustomBundle>,
+    /// Default `_meta.ui.csp` block applied when a tool doesn't carry
+    /// its own override.
+    pub csp: CspBlock,
+    /// Default `_meta.ui.domain`. Empty string means "synthesise per
+    /// tool from the tool name".
+    pub domain: String,
     pub preview_mode: bool,
     pub debug_headers: bool,
     pub max_body_bytes: usize,
@@ -178,6 +258,17 @@ impl PolicyConfig {
             .map(|v| v as usize)
             .unwrap_or(1_048_576);
 
+        let csp = raw
+            .csp
+            .as_ref()
+            .map(parse_top_level_csp)
+            .unwrap_or_default();
+        let domain = raw
+            .domain
+            .as_deref()
+            .map(|s| s.trim().to_string())
+            .unwrap_or_default();
+
         Ok(Self {
             appify_tools: raw.appify_tools.unwrap_or(true),
             appify_responses: raw.appify_responses.unwrap_or(true),
@@ -187,10 +278,41 @@ impl PolicyConfig {
             default_actions,
             deny_tools,
             custom_bundles: custom_bundles_idx,
+            csp,
+            domain,
             preview_mode: raw.preview_mode.unwrap_or(false),
             debug_headers: raw.debug_headers.unwrap_or(false),
             max_body_bytes,
         })
+    }
+
+    /// Resolve the `_meta.ui.domain` for a given tool.
+    /// Per-tool override → top-level default → synthesised
+    /// `<toolName>.mcp-apps-policy.local` (sanitised — non-DNS chars
+    /// become `-`).
+    pub fn domain_for(&self, tool: &str) -> String {
+        if let Some(t) = self.tools.get(tool) {
+            if let Some(d) = &t.domain {
+                if !d.is_empty() {
+                    return d.clone();
+                }
+            }
+        }
+        if !self.domain.is_empty() {
+            return self.domain.clone();
+        }
+        format!("{}.mcp-apps-policy.local", sanitise_dns_label(tool))
+    }
+
+    /// Resolve the `_meta.ui.csp` block for a given tool. Per-tool
+    /// override wins entirely; otherwise the global default applies.
+    pub fn csp_for(&self, tool: &str) -> &CspBlock {
+        if let Some(t) = self.tools.get(tool) {
+            if let Some(c) = &t.csp {
+                return c;
+            }
+        }
+        &self.csp
     }
 
     /// Resolve the renderer to use for a given tool, considering the
@@ -295,12 +417,20 @@ fn parse_tool(
         .iter()
         .map(|a| parse_action(&name, a))
         .collect::<Result<Vec<_>, _>>()?;
+    let domain = raw
+        .domain
+        .as_deref()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+    let csp = raw.csp.as_ref().map(parse_per_tool_csp);
     Ok((
         name,
         ToolOverride {
             renderer,
             appify,
             actions,
+            domain,
+            csp,
         },
     ))
 }
@@ -322,10 +452,16 @@ fn parse_action(rule: &str, raw: &Actions0Config) -> Result<Action, ConfigError>
     }
     let args_template = parse_args_template(&raw.args_template)
         .map_err(|e| ConfigError::Tool(rule.into(), format!("action -> {tool}: {e}")))?;
+    let select = parse_select(&raw.select)
+        .map_err(|e| ConfigError::Tool(rule.into(), format!("action -> {tool}: {e}")))?;
+    let mode = parse_action_mode(&raw.mode)
+        .map_err(|e| ConfigError::Tool(rule.into(), format!("action -> {tool}: {e}")))?;
     Ok(Action {
         tool,
         label,
         args_template,
+        select,
+        mode,
     })
 }
 
@@ -344,11 +480,45 @@ fn parse_default_action(raw: &DefaultActions0Config) -> Result<Action, ConfigErr
     }
     let args_template = parse_args_template(&raw.args_template)
         .map_err(|e| ConfigError::DefaultAction(format!("{tool}: {e}")))?;
+    let select = parse_select(&raw.select)
+        .map_err(|e| ConfigError::DefaultAction(format!("{tool}: {e}")))?;
+    let mode = parse_action_mode(&raw.mode)
+        .map_err(|e| ConfigError::DefaultAction(format!("{tool}: {e}")))?;
     Ok(Action {
         tool,
         label,
         args_template,
+        select,
+        mode,
     })
+}
+
+fn parse_select(raw: &Option<String>) -> Result<SelectMode, String> {
+    let s = raw.as_deref().unwrap_or("");
+    SelectMode::parse(s).ok_or_else(|| format!("invalid select '{s}' (use none|single|multi)"))
+}
+
+fn parse_action_mode(raw: &Option<String>) -> Result<ActionMode, String> {
+    let s = raw.as_deref().unwrap_or("");
+    ActionMode::parse(s).ok_or_else(|| format!("invalid mode '{s}' (use call|form)"))
+}
+
+/// Map a tool name to a DNS label by replacing characters illegal in
+/// DNS with `-`, lowercasing, collapsing runs of `-`, and trimming.
+fn sanitise_dns_label(tool: &str) -> String {
+    let mut out = String::with_capacity(tool.len());
+    let mut last_dash = false;
+    for c in tool.chars() {
+        let ok = c.is_ascii_alphanumeric();
+        if ok {
+            out.push(c.to_ascii_lowercase());
+            last_dash = false;
+        } else if !last_dash {
+            out.push('-');
+            last_dash = true;
+        }
+    }
+    out.trim_matches('-').to_string()
 }
 
 fn parse_args_template(
@@ -395,20 +565,34 @@ fn parse_custom_bundle(raw: &CustomBundles0Config) -> Result<CustomBundle, Confi
     Ok(CustomBundle { name, html, csp })
 }
 
-fn parse_csp(raw: &Csp1Config) -> CustomBundleCsp {
-    fn collect(v: &Option<Vec<String>>) -> Vec<String> {
-        v.as_deref()
-            .unwrap_or(&[])
-            .iter()
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty())
-            .collect()
+fn collect_domains(v: &Option<Vec<String>>) -> Vec<String> {
+    v.as_deref()
+        .unwrap_or(&[])
+        .iter()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect()
+}
+
+fn parse_csp(raw: &Csp1Config) -> CspBlock {
+    CspBlock {
+        connect_domains: collect_domains(&raw.connect_domains),
+        resource_domains: collect_domains(&raw.resource_domains),
+        frame_domains: collect_domains(&raw.frame_domains),
+        base_uri_domains: collect_domains(&raw.base_uri_domains),
     }
-    CustomBundleCsp {
-        connect_domains: collect(&raw.connect_domains),
-        resource_domains: collect(&raw.resource_domains),
-        frame_domains: collect(&raw.frame_domains),
-        base_uri_domains: collect(&raw.base_uri_domains),
+}
+
+fn parse_per_tool_csp(raw: &Csp1Config) -> CspBlock {
+    parse_csp(raw)
+}
+
+fn parse_top_level_csp(raw: &CspConfig) -> CspBlock {
+    CspBlock {
+        connect_domains: collect_domains(&raw.connect_domains),
+        resource_domains: collect_domains(&raw.resource_domains),
+        frame_domains: collect_domains(&raw.frame_domains),
+        base_uri_domains: collect_domains(&raw.base_uri_domains),
     }
 }
 
@@ -429,6 +613,8 @@ mod tests {
             default_actions: None,
             deny_tools: None,
             custom_bundles: None,
+            csp: None,
+            domain: None,
             preview_mode: None,
             debug_headers: None,
             max_body_bytes: None,
@@ -466,6 +652,8 @@ mod tests {
                 renderer: Some("nonexistent".into()),
                 appify: None,
                 actions: None,
+                csp: None,
+                domain: None,
             }]),
             ..empty_config()
         })
@@ -486,6 +674,8 @@ mod tests {
                 renderer: Some("fancy".into()),
                 appify: None,
                 actions: None,
+                csp: None,
+                domain: None,
             }]),
             ..empty_config()
         })
@@ -521,7 +711,11 @@ mod tests {
                     tool: "create_order".into(),
                     label: "Order".into(),
                     args_template: Some("{\"sku\":\"${sku}\"}".into()),
+                    select: None,
+                    mode: None,
                 }]),
+                csp: None,
+                domain: None,
             }]),
             ..empty_config()
         })
@@ -545,13 +739,19 @@ mod tests {
                         tool: "ok_tool".into(),
                         label: "OK".into(),
                         args_template: None,
+                        select: None,
+                        mode: None,
                     },
                     Actions0Config {
                         tool: "forbidden".into(),
                         label: "No".into(),
                         args_template: None,
+                        select: None,
+                        mode: None,
                     },
                 ]),
+                csp: None,
+                domain: None,
             }]),
             ..empty_config()
         })
@@ -572,7 +772,11 @@ mod tests {
                     tool: "y".into(),
                     label: "Y".into(),
                     args_template: Some("{ not json".into()),
+                    select: None,
+                    mode: None,
                 }]),
+                csp: None,
+                domain: None,
             }]),
             ..empty_config()
         })

@@ -76,6 +76,8 @@ mod tests {
             default_actions: None,
             deny_tools: None,
             custom_bundles: None,
+            csp: None,
+            domain: None,
             preview_mode: None,
             debug_headers: None,
             max_body_bytes: None,
@@ -111,6 +113,8 @@ mod tests {
                 renderer: Some("fancy".into()),
                 appify: None,
                 actions: None,
+                csp: None,
+                domain: None,
             }]),
             ..empty_raw()
         })
