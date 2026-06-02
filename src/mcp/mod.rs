@@ -33,6 +33,13 @@ pub mod sse;
 /// characters illegal in a URI authority/path are URL-encoded.
 pub const UI_AUTHORITY: &str = "mcp-apps-policy";
 
+/// Spec-namespaced `_meta` key for the MCP Apps extension (SEP-1865).
+/// Claude.ai's host requires this exact key — `_meta.ui` is rejected
+/// with "no ui/resourceUri in tool._meta". We write under both keys so
+/// strict (Claude.ai) and relaxed (Inspector / our own bundle) hosts
+/// both find the metadata.
+pub const UI_META_KEY: &str = "io.modelcontextprotocol/ui";
+
 /// Version segment baked into every minted `ui://` URI. Hosts (notably
 /// Claude.ai's `*.claudemcpcontent.com` sandbox proxy) cache the
 /// bundle keyed by URI; when we ship a new bundle we want the URI to
@@ -144,20 +151,35 @@ fn annotate_tools(tools: &mut [Value], cfg: &PolicyConfig) {
         let Some(meta_map) = meta.as_object_mut() else {
             continue;
         };
-        let ui_obj = meta_map
-            .entry("ui".to_string())
-            .or_insert_with(|| json!({}));
-        if let Some(ui_map) = ui_obj.as_object_mut() {
-            // Don't clobber an existing resourceUri from the upstream
-            // — the server may already be MCP-Apps-aware.
-            ui_map
-                .entry("resourceUri".to_string())
-                .or_insert_with(|| Value::String(synthesize_ui_uri(&name)));
-            // Default visibility: model+app, per the spec.
-            ui_map
-                .entry("visibility".to_string())
-                .or_insert_with(|| json!(["model", "app"]));
+        // Build the UI metadata once, then mirror it under both
+        // `_meta.ui` (informal alias used by Inspector / our bundle)
+        // and `_meta["io.modelcontextprotocol/ui"]` (the SEP-1865
+        // spec-namespaced key Claude.ai's host requires).
+        let mut ui = json!({
+            "resourceUri": synthesize_ui_uri(&name),
+            "visibility": ["model", "app"],
+        });
+        // If the upstream already shipped MCP Apps metadata, prefer
+        // its values — merge ours underneath without clobbering.
+        if let Some(existing) = meta_map.get(UI_META_KEY).cloned() {
+            merge_objects(&mut ui, &existing);
+        } else if let Some(existing) = meta_map.get("ui").cloned() {
+            merge_objects(&mut ui, &existing);
         }
+        meta_map.insert(UI_META_KEY.to_string(), ui.clone());
+        meta_map.insert("ui".to_string(), ui);
+    }
+}
+
+/// Shallow-merge `src` into `dst` (object-only). Keys present in `src`
+/// overwrite corresponding keys in `dst`. Used to honour upstream-
+/// supplied UI metadata over our synthesised defaults.
+fn merge_objects(dst: &mut Value, src: &Value) {
+    let (Some(dst_map), Some(src_map)) = (dst.as_object_mut(), src.as_object()) else {
+        return;
+    };
+    for (k, v) in src_map {
+        dst_map.insert(k.clone(), v.clone());
     }
 }
 
@@ -244,9 +266,14 @@ fn apply_to_tool_call_result(
                 .entry("_meta".to_string())
                 .or_insert_with(|| json!({}));
             if let Some(meta_map) = meta.as_object_mut() {
-                let ui = meta_map
-                    .entry("ui".to_string())
-                    .or_insert_with(|| json!({}));
+                // Read whichever shape (spec key or alias) the result
+                // already carries so we don't drop fields the upstream
+                // set, then re-emit under both keys.
+                let mut ui = meta_map
+                    .get(UI_META_KEY)
+                    .cloned()
+                    .or_else(|| meta_map.get("ui").cloned())
+                    .unwrap_or_else(|| json!({}));
                 if let Some(ui_map) = ui.as_object_mut() {
                     ui_map.insert("actions".to_string(), Value::Array(resolved));
                     if let Some(t) = &tool_name {
@@ -265,6 +292,8 @@ fn apply_to_tool_call_result(
                         .entry("renderer".to_string())
                         .or_insert_with(|| Value::String(renderer_label));
                 }
+                meta_map.insert(UI_META_KEY.to_string(), ui.clone());
+                meta_map.insert("ui".to_string(), ui);
             }
         }
         true
@@ -579,6 +608,63 @@ mod tests {
         assert_eq!(
             tools[1]["_meta"]["ui"]["resourceUri"].as_str().unwrap(),
             synthesize_ui_uri("list_customers")
+        );
+    }
+
+    #[test]
+    fn emits_spec_namespaced_meta_key_on_tools_list() {
+        // Claude.ai's host requires `_meta["io.modelcontextprotocol/ui"]`
+        // — the relaxed `_meta.ui` alias is rejected with
+        // "no ui/resourceUri in tool._meta". Both keys must be present.
+        let cfg = cfg_default();
+        let mut body = json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "result": {"tools": [{"name": "get_inventory"}]}
+        });
+        rewrite_response(&cfg, &mut body, None);
+        let tool = &body["result"]["tools"][0];
+        let spec = &tool["_meta"][UI_META_KEY];
+        assert_eq!(
+            spec["resourceUri"].as_str().unwrap(),
+            synthesize_ui_uri("get_inventory")
+        );
+        assert_eq!(spec["visibility"], json!(["model", "app"]));
+        // Alias must mirror it for relaxed hosts (Inspector, our bundle).
+        assert_eq!(tool["_meta"]["ui"], *spec);
+    }
+
+    #[test]
+    fn emits_spec_namespaced_meta_key_on_tool_call_result() {
+        let cfg = PolicyConfig::from_raw(&RawConfig {
+            tools: Some(vec![crate::generated::config::Tools0Config {
+                name: "get_inventory".into(),
+                renderer: None,
+                appify: None,
+                actions: Some(vec![crate::generated::config::Actions0Config {
+                    tool: "create_order".into(),
+                    label: "Order".into(),
+                    args_template: Some("{\"sku\":\"${sku}\"}".into()),
+                }]),
+            }]),
+            ..raw_empty()
+        })
+        .unwrap();
+        let mut body = json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "result": {
+                "content": [{"type": "text", "text": "{\"sku\":\"A1\"}"}]
+            }
+        });
+        rewrite_response(&cfg, &mut body, Some("get_inventory"));
+        let spec = &body["result"]["_meta"][UI_META_KEY];
+        let alias = &body["result"]["_meta"]["ui"];
+        assert_eq!(spec, alias);
+        assert_eq!(spec["actions"][0]["tool"], "create_order");
+        assert_eq!(
+            spec["resourceUri"].as_str().unwrap(),
+            synthesize_ui_uri("get_inventory")
         );
     }
 

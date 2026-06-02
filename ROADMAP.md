@@ -91,6 +91,15 @@ bundle so the policy works without external hosting.
   The legacy unversioned shape (`ui://mcp-apps-policy/<tool>`) is
   still accepted on the read path so cached references from older
   releases keep resolving.
+- **Spec-namespaced `_meta` key (0.1.10).** UI metadata is now emitted
+  under both `_meta["io.modelcontextprotocol/ui"]` (the SEP-1865
+  spec-namespaced key) and `_meta.ui` (the relaxed alias used by
+  Inspector and the embedded bundle). Strict hosts — Claude.ai
+  rejected previous releases with *"Tool X has no UI resource (no
+  ui/resourceUri in tool._meta)"* because they only look under the
+  fully-qualified key, while the alias kept relaxed hosts working.
+  Dual-write covers both groups without forcing operators to pick.
+  The embedded bundle reads whichever shape is present.
 
 **Known gaps**
 

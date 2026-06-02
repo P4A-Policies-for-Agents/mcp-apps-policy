@@ -95,6 +95,11 @@ fn injects_action_buttons_when_tool_name_is_known() {
             env!("CARGO_PKG_VERSION")
         )
     );
+
+    // Spec-namespaced key must mirror the alias for SEP-1865 hosts.
+    let spec_key = &body["result"]["_meta"]["io.modelcontextprotocol/ui"];
+    assert_eq!(spec_key, &body["result"]["_meta"]["ui"]);
+    assert_eq!(spec_key["resourceUri"], uri);
 }
 
 #[test]

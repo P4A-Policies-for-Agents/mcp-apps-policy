@@ -57,6 +57,16 @@ fn each_tool_gets_a_ui_resource_uri() {
     );
     assert_eq!(tools[0]["name"], "get_inventory");
     assert_eq!(tools[0]["description"], "Look up stock");
+
+    // Strict SEP-1865 hosts (Claude.ai) read the spec-namespaced
+    // `_meta["io.modelcontextprotocol/ui"]` key and reject responses
+    // that only carry the relaxed `_meta.ui` alias. Both must be set.
+    let spec_key = &tools[0]["_meta"]["io.modelcontextprotocol/ui"];
+    assert_eq!(
+        spec_key["resourceUri"].as_str().unwrap(),
+        format!("{prefix}get_inventory")
+    );
+    assert_eq!(spec_key, &tools[0]["_meta"]["ui"]);
 }
 
 #[test]

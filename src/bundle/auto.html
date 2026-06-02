@@ -236,7 +236,10 @@
       return;
     }
     var meta = lastResult._meta || {};
-    var ui = meta.ui || {};
+    // SEP-1865 hosts (Claude.ai) put metadata under
+    // `_meta["io.modelcontextprotocol/ui"]`; relaxed hosts and our
+    // own bundle accept the `_meta.ui` alias. Read whichever is set.
+    var ui = meta["io.modelcontextprotocol/ui"] || meta.ui || {};
     if (ui.renderer) renderer = ui.renderer;
     if (ui.resourceUri) resourceUri = ui.resourceUri;
 
@@ -410,7 +413,7 @@
   // -------------------- actions --------------------
   function buildActions(currentData) {
     var meta = (lastResult && lastResult._meta) || {};
-    var ui = meta.ui || {};
+    var ui = meta["io.modelcontextprotocol/ui"] || meta.ui || {};
     var actions = Array.isArray(ui.actions) ? ui.actions : [];
     var div = document.createElement("div");
     if (!actions.length) return div;

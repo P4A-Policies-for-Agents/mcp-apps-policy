@@ -9,9 +9,11 @@ When applied to an API instance whose upstream is an MCP server, the
 policy:
 
 - Annotates every advertised tool with the
-  `io.modelcontextprotocol/ui` extension metadata
-  (`_meta.ui.resourceUri`) so MCP-Apps-aware hosts know to render the
-  tool as an iframe app.
+  `io.modelcontextprotocol/ui` extension metadata under both the
+  spec-namespaced key (`_meta["io.modelcontextprotocol/ui"]`, required
+  by Claude.ai) and the relaxed `_meta.ui` alias (Inspector, the
+  embedded bundle), so hosts on either side of the namespace debate
+  see the `resourceUri` and render the tool as an iframe app.
 - Serves an embedded auto-rendering HTML bundle for those `ui://`
   URIs by short-circuiting `resources/read` — no external CDN, no
   separate hosting, no upstream code changes.
@@ -397,6 +399,7 @@ during rollout.
 | Iframe never renders | Host doesn't speak MCP Apps yet | Try a host that does (Claude.ai, VS Code Copilot, Goose, MCPJam). The wire format is still correct — non-supporting hosts just ignore `_meta.ui`. |
 | Iframe loads but stays empty / "Waiting for tool result…" | Host gates `tool-result` pushes on a successful `ui/initialize`, or on a non-zero `size-changed` report. Turn on `previewMode: true` to enable the in-iframe debug overlay (`<meta name="x-mcp-debug">`); it logs every postMessage and surfaces handshake errors. |
 | Iframe renders an *old* bundle / `ui/initialize` is rejected with a field name (e.g. `appInfo`) the current source no longer uses | Host's sandbox proxy cached the previous bundle by URI. Bump the policy version — the `v<version>` segment in `ui://mcp-apps-policy/v<version>/<tool>` will change and the proxy will refetch. |
+| Claude.ai logs *"Tool X has no UI resource (no ui/resourceUri in tool._meta)"* even though `_meta.ui.resourceUri` is set | Strict SEP-1865 hosts only read `_meta["io.modelcontextprotocol/ui"]` (the spec-namespaced key) and ignore the `_meta.ui` alias. As of 0.1.10 the policy emits both. Upgrade to ≥ 0.1.10 and re-apply. |
 | Action button arguments are empty | `argsTemplate` references a `${field}` not present in `structuredContent` | Inspect the tool's `result.structuredContent` and align the template. |
 | `resources/read` for a `ui://` URI hits the upstream | Policy load order / wrong policy ref | Check `anypoint-cli-v4 api-mgr policy list` shows `mcp-apps-policy` applied. |
 | `Cannot process message because this session hasn't been initialized yet` | Upstream uses Streamable HTTP and requires an `initialize` handshake first | Issue an MCP `initialize`, capture the `mcp-session-id` response header, send it on subsequent calls. |
