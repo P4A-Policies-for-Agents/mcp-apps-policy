@@ -32,6 +32,11 @@
   .kv .k { color: var(--muted); white-space: nowrap; }
   .kv .v { word-break: break-word; }
   pre.json { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12px; padding: 10px 12px; background: var(--row); border-radius: var(--radius); white-space: pre-wrap; word-break: break-word; max-height: 60vh; overflow: auto; }
+  .nested-table { border: 1px solid var(--border); border-radius: var(--radius); background: var(--bg); }
+  .nested-table table { font-size: 12px; }
+  .nested-table th, .nested-table td { padding: 4px 8px; }
+  .nested-table th { position: static; }
+  .nested-kv { background: var(--row); border: 1px solid var(--border); border-radius: var(--radius); padding: 6px 10px; gap: 4px 10px; }
   td.select-cell, th.select-cell { width: 28px; padding: 6px 4px 6px 10px; }
   .form-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.35); display: flex; align-items: center; justify-content: center; padding: 20px; z-index: 10; }
   .form-card { background: var(--bg); color: var(--fg); border: 1px solid var(--border); border-radius: var(--radius); box-shadow: 0 8px 32px rgba(0,0,0,0.18); padding: 16px 18px; min-width: 280px; max-width: min(540px, calc(100vw - 40px)); width: 100%; max-height: calc(100vh - 40px); overflow: auto; }
@@ -431,7 +436,8 @@
       }
       keys.forEach(function (k) {
         var dk = document.createElement("div"); dk.className = "k"; dk.textContent = k;
-        var dv = document.createElement("div"); dv.className = "v"; dv.textContent = formatValue(data[k]);
+        var dv = document.createElement("div"); dv.className = "v";
+        dv.appendChild(renderValueNode(data[k], 0));
         grid.appendChild(dk); grid.appendChild(dv);
       });
       card.appendChild(grid);
@@ -522,7 +528,15 @@
         }
         columns.forEach(function (c) {
           var cell = document.createElement("td");
-          cell.textContent = formatValue(row && row[c]);
+          var cv = row && row[c];
+          // Primitives keep the simple textContent path (faster, lets
+          // browser ellipsise long strings); nested values render as
+          // mini-tables / kv blocks via renderValueNode.
+          if (cv === null || typeof cv === "undefined" || typeof cv !== "object") {
+            cell.textContent = formatValue(cv);
+          } else {
+            cell.appendChild(renderValueNode(cv, 0));
+          }
           tr.appendChild(cell);
         });
         tbody.appendChild(tr);
@@ -559,6 +573,112 @@
       try { return JSON.stringify(v); } catch (e) { return String(v); }
     }
     return String(v);
+  }
+
+  // Render a value as a DOM node, expanding nested objects/arrays one
+  // level into mini-tables / nested cards / bullet lists. Primitive
+  // values fall through to the textual `formatValue`. Used by the card
+  // and table renderers so an `items` field full of objects no longer
+  // collapses into a single illegible JSON.stringify line.
+  //
+  // depth caps the nesting so deeply recursive structures don't blow
+  // up the iframe; depth >= 2 falls back to formatted JSON.
+  function renderValueNode(v, depth) {
+    var d = typeof depth === "number" ? depth : 0;
+    if (v === null || typeof v === "undefined" || typeof v !== "object") {
+      var span = document.createElement("span");
+      span.textContent = formatValue(v);
+      return span;
+    }
+    if (d >= 2) {
+      // Too deep: show a compact JSON pre block.
+      var pre = document.createElement("pre");
+      pre.className = "json";
+      pre.style.margin = "0";
+      pre.style.fontSize = "12px";
+      try { pre.textContent = JSON.stringify(v, null, 2); }
+      catch (_) { pre.textContent = String(v); }
+      return pre;
+    }
+    if (Array.isArray(v)) {
+      if (!v.length) {
+        var em = document.createElement("span");
+        em.className = "empty";
+        em.textContent = "(empty list)";
+        return em;
+      }
+      // Array of plain objects → nested mini-table.
+      if (v.every(isPlainObject)) {
+        return buildNestedTable(v, d + 1);
+      }
+      // Array of primitives / mixed → bullet list.
+      var ul = document.createElement("ul");
+      ul.style.margin = "0";
+      ul.style.paddingLeft = "18px";
+      v.forEach(function (item) {
+        var li = document.createElement("li");
+        li.appendChild(renderValueNode(item, d + 1));
+        ul.appendChild(li);
+      });
+      return ul;
+    }
+    // Plain object → indented key/value block.
+    return buildNestedKv(v, d + 1);
+  }
+
+  function buildNestedTable(rows, depth) {
+    var wrap = document.createElement("div");
+    wrap.className = "nested-table";
+    wrap.style.overflow = "auto";
+    var t = document.createElement("table");
+    t.style.fontSize = "12px";
+    var cols = collectColumns(rows);
+    var thead = document.createElement("thead");
+    var hr = document.createElement("tr");
+    cols.forEach(function (c) {
+      var th = document.createElement("th");
+      th.textContent = c;
+      hr.appendChild(th);
+    });
+    thead.appendChild(hr);
+    t.appendChild(thead);
+    var tb = document.createElement("tbody");
+    rows.forEach(function (r) {
+      var tr = document.createElement("tr");
+      cols.forEach(function (c) {
+        var td = document.createElement("td");
+        td.appendChild(renderValueNode(r ? r[c] : undefined, depth));
+        tr.appendChild(td);
+      });
+      tb.appendChild(tr);
+    });
+    t.appendChild(tb);
+    wrap.appendChild(t);
+    return wrap;
+  }
+
+  function buildNestedKv(obj, depth) {
+    var keys = Object.keys(obj);
+    if (!keys.length) {
+      var em = document.createElement("span");
+      em.className = "empty";
+      em.textContent = "(empty object)";
+      return em;
+    }
+    var grid = document.createElement("div");
+    grid.className = "kv nested-kv";
+    grid.style.fontSize = "12px";
+    keys.forEach(function (k) {
+      var dk = document.createElement("div");
+      dk.className = "k";
+      dk.textContent = k;
+      var dv = document.createElement("div");
+      dv.className = "v";
+      dv.appendChild(renderValueNode(obj[k], depth));
+      grid.appendChild(dk);
+      grid.appendChild(dv);
+    });
+    return grid;
   }
 
   function stringifyForError(result) {
@@ -970,12 +1090,14 @@
       } else {
         args = edited;
       }
-      fireToolsCall(action, args, originBtn).then(function () {
-        if (overlay.parentNode) document.body.removeChild(overlay);
-      }).catch(function () {
-        submit.disabled = false;
-        cancel.disabled = false;
+      // Fire-and-replace (same reasoning as buildPreCallForm submit):
+      // some hosts deliver the upstream result via tool-result
+      // notification, not as a JSON-RPC reply, so awaiting here hangs.
+      fireToolsCall(action, args, originBtn).catch(function () {
+        showSubmittedNotice("Submission failed — re-issue the request from chat.");
       });
+      if (overlay.parentNode) document.body.removeChild(overlay);
+      showSubmittedNotice("Submitted. Waiting for the upstream response…");
     });
 
     overlay.appendChild(card);
@@ -1185,16 +1307,41 @@
       submit.disabled = true;
       cancel.disabled = true;
       submit.textContent = "Submitting…";
+      // Fire-and-replace: some hosts (Claude.ai) deliver the upstream
+      // tool result as a `ui/notifications/tool-result` notification
+      // instead of resolving the JSON-RPC request, so awaiting the
+      // promise here would hang until the host's MCP timeout (-32001).
+      // We swap the form for a "submitted" notice immediately;
+      // `render()` takes over when the next tool-result arrives via
+      // either the request reply or the notification.
       fireToolsCall({ tool: payload.tool }, args, null).catch(function () {
-        submit.disabled = false;
-        cancel.disabled = false;
-        submit.textContent = "Submit";
+        // If the host *does* error out the request, surface it.
+        showSubmittedNotice("Submission failed — the agent did not receive a response. Re-issue the request from chat.");
       });
+      showSubmittedNotice("Submitted. Waiting for the upstream response…");
     });
     formActions.appendChild(cancel);
     formActions.appendChild(submit);
     wrap.appendChild(formActions);
     return wrap;
+  }
+
+  // Replace the iframe content with a transient "submitted" notice.
+  // We don't try to track the in-flight tools/call: the next tool-result
+  // (delivered as either a request reply or a tool-result notification)
+  // will trigger render() and replace this notice automatically.
+  function showSubmittedNotice(message) {
+    var root = document.getElementById("root");
+    if (!root) return;
+    root.innerHTML = "";
+    var card = document.createElement("div");
+    card.className = "card";
+    var status = document.createElement("div");
+    status.className = "subtitle";
+    status.textContent = message;
+    card.appendChild(status);
+    root.appendChild(card);
+    emitSize();
   }
 
   function inferFieldType(v) {

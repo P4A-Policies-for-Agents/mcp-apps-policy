@@ -501,7 +501,7 @@ curl -s http://localhost:8081/mcp \
 curl -s http://localhost:8081/mcp \
   -H 'Content-Type: application/json' \
   -d '{"jsonrpc":"2.0","id":2,"method":"resources/read",
-       "params":{"uri":"ui://mcp-apps-policy/v0.1.25/get_inventory"}}' | jq
+       "params":{"uri":"ui://mcp-apps-policy/v0.1.27/get_inventory"}}' | jq
 ```
 
 ---

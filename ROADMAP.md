@@ -128,6 +128,32 @@ bundle so the policy works without external hosting.
   `postMessage` `targetOrigin` to it. Pre-0.1.11 we sent every
   message with `targetOrigin: "*"`, which MCP Inspector's strict
   cross-origin isolation could drop.
+- **Form submit no longer hangs on hosts that deliver results via
+  notification (0.1.27).** The pre-call form (`formTools[]`) and the
+  single-row inline Edit form used to await `fireToolsCall`'s
+  JSON-RPC reply before tearing down the form. Some hosts (notably
+  Claude.ai) deliver the upstream tool result via the
+  `ui/notifications/tool-result` notification path *instead of* as a
+  JSON-RPC response — so the iframe's pending Promise never
+  resolved and the user saw "Submitting…" until the host's MCP
+  timeout fired (`MCP error -32001: Request timed out`). Fix: both
+  forms now fire-and-replace — submit dismisses the form
+  immediately and shows a "Submitted. Waiting for the upstream
+  response…" notice; `render()` takes over when the next
+  tool-result arrives via either path. Functional behaviour is
+  identical on hosts that *do* reply to the request; the host's
+  reply triggers `render()` directly.
+- **Nested arrays/objects render as mini-tables in cards and table
+  cells (0.1.27).** Previously a field whose value was an array of
+  objects (e.g. `items: [{exception: null, payload: {...}, ...}, ...]`
+  on `delete_accounts`) collapsed into a single illegible
+  `JSON.stringify` line. New `renderValueNode` helper expands one
+  nesting level: arrays of plain objects become nested mini-tables,
+  single objects become indented key/value blocks, primitive
+  arrays become bullet lists. Depth is capped at 2 — deeper
+  nesting falls back to a compact JSON pre block so unbounded
+  recursion can't blow up the iframe. Primitives in cells keep the
+  fast textContent path so the change has no effect on flat tables.
 - **Multi-row Edit form with chat-mode submit (0.1.25).** `mode:
   "form"` now supports `select: "multi"`. The inline form opens
   with Prev / Next chrome and a `Row n of N` indicator; per-row
