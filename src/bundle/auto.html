@@ -456,6 +456,12 @@
       var table = document.createElement("table");
       var thead = document.createElement("thead");
       var hr = document.createElement("tr");
+      if (wantsSingle) {
+        var thR = document.createElement("th");
+        thR.className = "select-cell";
+        thR.textContent = "";
+        hr.appendChild(thR);
+      }
       if (wantsMulti) {
         var thAll = document.createElement("th");
         thAll.className = "select-cell";
@@ -478,17 +484,27 @@
         });
         thAll.appendChild(allBox);
         hr.appendChild(thAll);
-      } else if (wantsSingle) {
-        var thR = document.createElement("th");
-        thR.className = "select-cell";
-        thR.textContent = "";
-        hr.appendChild(thR);
       }
       columns.forEach(function (c) { var th = document.createElement("th"); th.textContent = c; hr.appendChild(th); });
       thead.appendChild(hr); table.appendChild(thead);
       var tbody = document.createElement("tbody");
       rows.forEach(function (row, rowIdx) {
         var tr = document.createElement("tr");
+        if (wantsSingle) {
+          var td2 = document.createElement("td");
+          td2.className = "select-cell";
+          var radio = document.createElement("input");
+          radio.type = "radio";
+          radio.name = "mcp-row-select";
+          radio.setAttribute("data-row-idx", String(rowIdx));
+          radio.setAttribute("aria-label", "Select row " + (rowIdx + 1));
+          radio.addEventListener("change", function () {
+            if (radio.checked) selection.selectedIdx = rowIdx;
+            refresh();
+          });
+          td2.appendChild(radio);
+          tr.appendChild(td2);
+        }
         if (wantsMulti) {
           var td = document.createElement("td");
           td.className = "select-cell";
@@ -503,20 +519,6 @@
           });
           td.appendChild(box);
           tr.appendChild(td);
-        } else if (wantsSingle) {
-          var td2 = document.createElement("td");
-          td2.className = "select-cell";
-          var radio = document.createElement("input");
-          radio.type = "radio";
-          radio.name = "mcp-row-select";
-          radio.setAttribute("data-row-idx", String(rowIdx));
-          radio.setAttribute("aria-label", "Select row " + (rowIdx + 1));
-          radio.addEventListener("change", function () {
-            if (radio.checked) selection.selectedIdx = rowIdx;
-            refresh();
-          });
-          td2.appendChild(radio);
-          tr.appendChild(td2);
         }
         columns.forEach(function (c) {
           var cell = document.createElement("td");

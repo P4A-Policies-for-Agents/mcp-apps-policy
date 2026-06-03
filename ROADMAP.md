@@ -128,6 +128,25 @@ bundle so the policy works without external hosting.
   `postMessage` `targetOrigin` to it. Pre-0.1.11 we sent every
   message with `targetOrigin: "*"`, which MCP Inspector's strict
   cross-origin isolation could drop.
+- **Edit button no longer stuck disabled when single + multi actions
+  coexist (0.1.24).** Bug fix in `src/bundle/auto.html`'s table
+  renderer. Pre-0.1.24, the column-header and row-cell logic used
+  `if (wantsMulti) {…} else if (wantsSingle) {…}` — so when a tool
+  configured BOTH a single-pick action (`select: "single"`, e.g.
+  Edit) AND a multi-pick action (`select: "multi"`, e.g. Delete) on
+  the same table, only the checkbox column rendered. No radios
+  meant `selection.selectedIdx` was never set, so single-pick
+  buttons (Edit) stayed disabled forever. Fix: render BOTH a radio
+  column AND a checkbox column when both shapes are configured, so
+  `selectedIdx` and `multiIdx` track independently. Also flipped
+  CRM's `update_accounts` Edit action from `mode: "prompt"` to
+  `mode: "form"` so clicking Edit opens the existing
+  `openInlineForm` flow (form pre-filled with the picked row's
+  fields, system fields hidden, Submit issues `tools/call` with the
+  merged values) — matching the user's stated expectation that Edit
+  "show a form with the selected items and let the user change the
+  values, item by item." Tools with only one action shape keep
+  rendering exactly one selection column.
 - **Pre-call confirmation forms (0.1.23).** New top-level
   `formTools[]` array. When the agent issues `tools/call` for a
   listed tool, the policy intercepts the request on the way in and

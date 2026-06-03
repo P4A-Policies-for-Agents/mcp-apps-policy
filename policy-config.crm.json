@@ -21,8 +21,7 @@
           "tool": "update_accounts",
           "label": "Edit",
           "select": "single",
-          "mode": "prompt",
-          "prompt": "Please update the account ${Id} (${Name}). I'd like to change the following fields: "
+          "mode": "form"
         },
         {
           "tool": "delete_accounts",
