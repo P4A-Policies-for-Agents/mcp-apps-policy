@@ -5,6 +5,84 @@ PDK) that turns any MCP server fronted by the gateway into an
 [MCP Apps](https://modelcontextprotocol.io/extensions/apps/overview)
 host surface — without changing the upstream server.
 
+## Purpose
+
+Make every MCP server behind the gateway *render-ready* for MCP Apps
+hosts (Claude.ai, Goose, MCP Inspector, …) without touching the
+upstream. The policy converts standard MCP responses into the shape
+MCP Apps hosts expect — `_meta.ui.resourceUri`, an embedded HTML
+bundle, `structuredContent`, action buttons — at the gateway edge.
+
+## Goals
+
+- **Zero upstream changes.** Point the gateway at any compliant MCP
+  server and apps appear, including servers the operator does not
+  own.
+- **Single install, fleet-wide.** One asset, one apply per API
+  instance; no separate UI hosting, no CDN, no per-server bundle
+  pipeline.
+- **Backward-safe.** Hosts that don't support the MCP Apps extension
+  see exactly the same wire shape they did before — the extra
+  `_meta.ui` keys are ignored.
+- **Operator-tunable, not LLM-driven.** Layout, action buttons, CSP,
+  and pre-call forms come from declarative config — deterministic,
+  reviewable, and free of token cost.
+
+## What issue this policy is solving
+
+A normal MCP tool just returns JSON or text. An MCP App bolts a
+whole separate app-communication layer on top of standard MCP:
+
+- HTML UI resources
+- iframe rendering
+- `postMessage` communication
+- JSON-RPC interactions across the iframe boundary
+- UI lifecycle management
+- CSP configuration
+- permission handling
+
+👉 **Impact:** bigger codebase, more testing burden, and more things
+that can break — for **every** server you'd want to "appify."
+
+## 🎉 Why this policy is a game changer
+
+Because it runs on the Gateway, you don't do any of that heavy
+lifting. Point it at any MCP server fronted by the gateway and it
+*dynamically* takes whatever the server already offers and converts
+it into a rendered MCP App — no upstream code changes, no separate
+UI hosting, no per-server protocol plumbing. One gateway-side
+install and every server behind it speaks MCP Apps. Hosts that
+don't support the extension simply ignore the extra metadata and
+behave exactly as before.
+
+## Benefits
+
+- **No per-server engineering.** The bundle, the handshake, the
+  CSP, the resource short-circuit — all live in the policy. New MCP
+  servers light up the moment the policy is applied.
+- **Consistent UX across upstreams.** Every server's tools render
+  through the same auto-renderer (table / card / form / json), with
+  the same action conventions, the same prompt-mode behaviour, and
+  the same theming hooks.
+- **Fleet-level rollout and rollback.** Master switches
+  (`appifyTools` / `appifyResponses` / `appifyActions`), a deny
+  list, and per-tool overrides give operators incremental control —
+  enable a few tools, watch the metrics, expand.
+- **Pre-call confirmation forms.** `formTools[]` intercepts a
+  tool/call and asks the user to confirm or augment the agent's
+  arguments before anything reaches the upstream — destructive or
+  side-effectful tools become safe by default.
+- **Multi-host compatibility.** Spec-namespaced + alias `_meta`
+  keys, version-pinned `ui://` URIs, origin-pinned `postMessage`,
+  `ui/message` for prompt-mode actions — written for the strict
+  hosts (Claude.ai, MCP Inspector) without breaking the relaxed
+  ones (Goose, custom MCP clients).
+- **Streamable HTTP / SSE compatible.** Same transforms run frame
+  by frame on `text/event-stream` responses; heartbeats and
+  non-JSON frames pass through unchanged.
+
+---
+
 When applied to an API instance whose upstream is an MCP server, the
 policy:
 
@@ -140,6 +218,7 @@ The policy only modifies *responses* (and the synthesised
 | `tools[]` | array | `[]` | Per-tool overrides — renderer, appify on/off, actions, plus `csp` / `domain` overrides for hosts that need stable, tool-specific origins. |
 | `defaultActions[]` | array | `[]` | Actions appended to every tool's button row when `appifyActions` is on. |
 | `denyTools[]` | array | `[]` | Tool names that must never be appified, advertised, or targeted by an action. Takes precedence over everything else. |
+| `formTools[]` | array | `[]` | Tool names that should render a **pre-call confirmation form** instead of running immediately. The agent's first `tools/call` is short-circuited with a synthetic result containing the agent's arguments and any operator-declared `formFields[]`. The user reviews / edits / completes the form and submits; the policy strips an internal marker and forwards the confirmed call upstream. Lets the user fill optional fields the agent didn't supply, and gives a final confirmation step for destructive or side-effectful tools. Deny-listed tools are never form tools. |
 | `customBundles[]` | array | `[]` | Inline HTML bundles served for specific tools (per-tool `renderer: <name>`). |
 | `previewMode` | bool | `false` | Adds an `x-mcp-apps-preview` response header with a compact JSON describing what changed, and injects a `<meta name="x-mcp-debug">` marker into the embedded bundle so the in-iframe debug overlay activates (logs every postMessage on a fixed-position panel). Off in production. |
 | `debugHeaders` | bool | `false` | Adds `x-mcp-apps-method`, `x-mcp-apps-tool`, `x-mcp-apps-action`, `x-mcp-apps-renderer` response headers. |
@@ -223,6 +302,80 @@ The policy only modifies *responses* (and the synthesised
   - `${rows}` — the array of selected rows (multi only).
   - `${rows[].Field}` — project `Field` across the selected rows
     (multi only).
+- `formFields[]` — only honoured when the tool name is also listed
+  in the top-level `formTools[]`. Each entry declares an extra field
+  to surface on the pre-call form *in addition to* the keys the
+  agent already filled in. Useful for optional fields the agent
+  often omits. Shape:
+
+  ```jsonc
+  {
+    "formFields": [
+      { "name": "deliveryNotes", "label": "Delivery notes",
+        "type": "string", "placeholder": "(optional)" },
+      { "name": "priority", "label": "Priority",
+        "type": "number", "required": false }
+    ]
+  }
+  ```
+
+  `type` is one of `string` | `number` | `boolean` | `json` (default
+  `string`). `required: true` adds an asterisk and blocks submission
+  until filled in. The bundle merges agent-supplied values with
+  declared fields — the user always sees the agent's choices and
+  any extras you declared, in declaration order.
+
+### Pre-call confirmation forms (`formTools[]`)
+
+The default `tools/call` flow runs the upstream tool the moment the
+agent decides to call it. For destructive or side-effectful tools
+(create / update / delete / order / submit) operators usually want
+the user to **confirm and optionally augment** the call first.
+
+Listing a tool name in the top-level `formTools[]` array enables
+this flow:
+
+1. Agent issues `tools/call` for the tool.
+2. The policy intercepts the request and replies locally with a
+   synthetic result whose `structuredContent` is
+   `{ _mcpAppsForm: true, tool, values: <agent args>, fields: <declared formFields> }`.
+3. The embedded bundle recognises the marker and renders a form
+   pre-filled with the agent's values, plus any optional fields you
+   declared in `tools[].formFields[]`.
+4. On Submit, the bundle re-issues `tools/call` with the merged
+   arguments and an internal `_mcpAppsConfirmed: true` marker.
+5. The policy strips the marker and forwards the confirmed call to
+   the upstream MCP server. The tool runs once, with the user's
+   approved arguments.
+6. The agent sees a single `tools/call` round-trip — the
+   interception is invisible from its perspective.
+
+Cancelling clears the in-iframe state without making the call;
+nothing reaches the upstream.
+
+Example: confirm before submitting an order.
+
+```jsonc
+{
+  "formTools": ["submit_order"],
+  "tools": [
+    {
+      "name": "submit_order",
+      "formFields": [
+        { "name": "deliveryNotes", "label": "Delivery notes",
+          "type": "string", "placeholder": "(optional)" },
+        { "name": "expedite", "label": "Expedite shipping",
+          "type": "boolean" }
+      ]
+    }
+  ]
+}
+```
+
+Whatever args the agent supplies (e.g. `{sku, qty}`) appear as
+pre-filled inputs; the operator-declared `deliveryNotes` and
+`expedite` show up as additional editable fields. Submit fires
+`submit_order` once, with the merged payload.
 
 ### Resource URI scheme
 
@@ -348,7 +501,7 @@ curl -s http://localhost:8081/mcp \
 curl -s http://localhost:8081/mcp \
   -H 'Content-Type: application/json' \
   -d '{"jsonrpc":"2.0","id":2,"method":"resources/read",
-       "params":{"uri":"ui://mcp-apps-policy/v0.1.11/get_inventory"}}' | jq
+       "params":{"uri":"ui://mcp-apps-policy/v0.1.23/get_inventory"}}' | jq
 ```
 
 ---

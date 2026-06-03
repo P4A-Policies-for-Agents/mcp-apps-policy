@@ -164,10 +164,106 @@ async fn request_filter(
         }
     }
 
+    // formTools[] interception. When the agent issues `tools/call` for
+    // a tool listed in `form_tools` and the iframe hasn't yet stamped
+    // `_mcpAppsConfirmed: true` into the arguments, short-circuit with
+    // a synthetic `_mcpAppsForm: true` result so the bundle renders a
+    // pre-call confirmation form. The confirmed call comes back through
+    // here a second time; we strip the marker and forward upstream.
+    if let (Some(name), Some(parsed)) = (tool_name.as_deref(), parsed.as_ref()) {
+        if cfg.is_form_tool(name) {
+            let confirmed = parsed
+                .pointer("/params/arguments/_mcpAppsConfirmed")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            if !confirmed {
+                let id = parsed
+                    .get("id")
+                    .cloned()
+                    .unwrap_or(Value::Null);
+                let agent_args = parsed
+                    .pointer("/params/arguments")
+                    .cloned()
+                    .unwrap_or_else(|| json!({}));
+                let fields = cfg
+                    .form_fields_for(name)
+                    .iter()
+                    .map(|f| {
+                        json!({
+                            "name": f.name,
+                            "label": f.label,
+                            "type": f.field_type,
+                            "placeholder": f.placeholder,
+                            "required": f.required,
+                        })
+                    })
+                    .collect::<Vec<_>>();
+                let synthetic = json!({
+                    "jsonrpc": "2.0",
+                    "id": id,
+                    "result": {
+                        "content": [{
+                            "type": "text",
+                            "text": "Review and confirm before submission."
+                        }],
+                        "structuredContent": {
+                            "_mcpAppsForm": true,
+                            "tool": name,
+                            "values": agent_args,
+                            "fields": fields,
+                        },
+                        "_meta": {
+                            "toolName": name,
+                            "ui": { "form": true }
+                        }
+                    }
+                });
+                let body_bytes = serde_json::to_vec(&synthetic).unwrap_or_default();
+                let response = Response::new(200)
+                    .with_headers(vec![
+                        ("content-type".into(), "application/json".into()),
+                        ("x-mcp-apps-served".into(), "form".into()),
+                        ("x-mcp-apps-tool".into(), name.to_string()),
+                    ])
+                    .with_body(body_bytes);
+                logger::info!(
+                    "mcp-apps-policy: served pre-call form for tool '{name}'"
+                );
+                return Flow::Break(response);
+            } else {
+                // Confirmed call — strip the marker before forwarding.
+                if let Some(stripped) = strip_confirmed_marker(parsed) {
+                    let bytes = serde_json::to_vec(&stripped).unwrap_or_default();
+                    if let Err(e) = body_state.handler().set_body(&bytes) {
+                        logger::error!(
+                            "mcp-apps-policy: failed to strip _mcpAppsConfirmed marker: {e:?}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
     Flow::Continue(RequestState {
         path: path_only,
         tool_name,
     })
+}
+
+/// Remove `params.arguments._mcpAppsConfirmed` from a parsed
+/// `tools/call` body, returning the modified value. Returns `None` if
+/// the marker is absent (no rewrite needed).
+fn strip_confirmed_marker(body: &Value) -> Option<Value> {
+    let mut clone = body.clone();
+    let args = clone
+        .get_mut("params")?
+        .get_mut("arguments")?
+        .as_object_mut()?;
+    if args.remove("_mcpAppsConfirmed").is_some() {
+        Some(clone)
+    } else {
+        None
+    }
 }
 
 /// If the parsed body is a JSON-RPC `tools/call`, return the tool name.
@@ -381,6 +477,42 @@ mod tests {
             "params": {"name": "get_inventory"}
         });
         assert!(match_resources_read(&body).is_none());
+    }
+
+    #[test]
+    fn strip_confirmed_marker_removes_only_the_flag() {
+        let body = json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": {
+                "name": "submit_order",
+                "arguments": {
+                    "sku": "A1",
+                    "qty": 3,
+                    "_mcpAppsConfirmed": true
+                }
+            }
+        });
+        let stripped = strip_confirmed_marker(&body).expect("marker present");
+        let args = &stripped["params"]["arguments"];
+        assert_eq!(args["sku"], "A1");
+        assert_eq!(args["qty"], 3);
+        assert!(args.get("_mcpAppsConfirmed").is_none());
+    }
+
+    #[test]
+    fn strip_confirmed_marker_returns_none_when_absent() {
+        let body = json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": {
+                "name": "submit_order",
+                "arguments": {"sku": "A1"}
+            }
+        });
+        assert!(strip_confirmed_marker(&body).is_none());
     }
 }
 

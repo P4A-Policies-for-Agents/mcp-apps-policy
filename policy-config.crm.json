@@ -33,13 +33,31 @@
         }
       ]
     },
-    { "name": "create_Accounts", "renderer": "form" },
+    {
+      "name": "create_Accounts",
+      "renderer": "form",
+      "formFields": [
+        {
+          "name": "Description",
+          "label": "Description",
+          "type": "string",
+          "placeholder": "Optional account description"
+        },
+        {
+          "name": "Industry",
+          "label": "Industry",
+          "type": "string",
+          "placeholder": "Optional"
+        }
+      ]
+    },
     { "name": "update_accounts", "renderer": "form" },
     { "name": "delete_accounts", "renderer": "card" }
   ],
 
   "defaultActions": [],
   "denyTools": [],
+  "formTools": ["create_Accounts"],
   "customBundles": [],
 
   "previewMode": false,

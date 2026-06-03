@@ -75,6 +75,7 @@ mod tests {
             tools: None,
             default_actions: None,
             deny_tools: None,
+            form_tools: None,
             custom_bundles: None,
             csp: None,
             domain: None,
@@ -115,6 +116,7 @@ mod tests {
                 actions: None,
                 csp: None,
                 domain: None,
+                form_fields: None,
             }]),
             ..empty_raw()
         })

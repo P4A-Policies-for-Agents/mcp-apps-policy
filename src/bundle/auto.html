@@ -300,6 +300,19 @@
         catch (e) { data = content.text; }
       }
     }
+    // formTools[] short-circuit. When the policy intercepts a
+    // `tools/call` for a tool listed in `formTools`, it returns a
+    // synthetic structuredContent with `_mcpAppsForm: true`. Render a
+    // pre-call confirmation form whose submit re-issues the call with
+    // `_mcpAppsConfirmed: true`; the policy strips the marker and
+    // forwards upstream.
+    if (data && typeof data === "object" && data._mcpAppsForm === true) {
+      root.innerHTML = '';
+      root.appendChild(buildHeader(displayName, "Confirm before submitting"));
+      root.appendChild(buildPreCallForm(data));
+      emitSize();
+      return;
+    }
     // The policy wraps top-level arrays under `{items: [...]}` so the
     // result is a valid MCP `structuredContent` object. Unwrap that
     // shape on the renderer side so the table view still kicks in.
@@ -820,6 +833,155 @@
     overlay.appendChild(card);
     document.body.appendChild(overlay);
     emitSize();
+  }
+
+  // -------------------- pre-call form --------------------
+  // Renders a confirmation form for tools listed in `formTools`. The
+  // policy short-circuits the agent's first `tools/call` with a
+  // synthetic structuredContent of:
+  //   { _mcpAppsForm: true,
+  //     tool: "<name>",
+  //     values: { ...agent-supplied args },
+  //     fields: [ { name, label, type, placeholder, required }, ... ] }
+  //
+  // The bundle merges agent values + operator-declared fields, lets the
+  // user edit, then re-issues `tools/call` with the original arg shape
+  // plus `_mcpAppsConfirmed: true`. The policy strips that marker and
+  // forwards upstream.
+  function buildPreCallForm(payload) {
+    var wrap = document.createElement("div");
+    wrap.className = "form-card";
+    wrap.style.boxShadow = "none";
+    wrap.style.padding = "0";
+
+    var note = document.createElement("div");
+    note.className = "subtitle";
+    note.textContent = "Review the agent's arguments and add any optional fields, then submit.";
+    wrap.appendChild(note);
+
+    var values = (payload.values && typeof payload.values === "object") ? payload.values : {};
+    var declared = Array.isArray(payload.fields) ? payload.fields : [];
+
+    // Field set = declared fields ∪ keys present in agent values.
+    // Declared fields render in the configured order first, then any
+    // extra agent-supplied keys appear after (so the user can see what
+    // the agent already filled in).
+    var seen = Object.create(null);
+    var ordered = [];
+    declared.forEach(function (f) {
+      if (!f || !f.name || seen[f.name]) return;
+      seen[f.name] = true;
+      ordered.push(f);
+    });
+    Object.keys(values).forEach(function (k) {
+      if (seen[k]) return;
+      seen[k] = true;
+      ordered.push({ name: k, label: k, type: inferFieldType(values[k]) });
+    });
+
+    var inputs = {};
+    ordered.forEach(function (f) {
+      var rowEl = document.createElement("div");
+      rowEl.className = "form-row";
+      var label = document.createElement("label");
+      label.textContent = (f.label || f.name) + (f.required ? " *" : "");
+      rowEl.appendChild(label);
+      var v = values[f.name];
+      var t = (f.type || "string").toLowerCase();
+      var input;
+      if (t === "boolean") {
+        input = document.createElement("input");
+        input.type = "checkbox";
+        input.checked = !!v;
+        input.setAttribute("data-type", "boolean");
+      } else if (t === "number") {
+        input = document.createElement("input");
+        input.type = "number";
+        if (v != null) input.value = String(v);
+        if (f.placeholder) input.placeholder = String(f.placeholder);
+        input.setAttribute("data-type", "number");
+      } else if (t === "json") {
+        input = document.createElement("textarea");
+        if (v != null) {
+          try { input.value = JSON.stringify(v, null, 2); }
+          catch (_) { input.value = String(v); }
+        }
+        if (f.placeholder) input.placeholder = String(f.placeholder);
+        input.setAttribute("data-type", "json");
+      } else {
+        input = document.createElement("input");
+        input.type = "text";
+        input.value = v == null ? "" : String(v);
+        if (f.placeholder) input.placeholder = String(f.placeholder);
+        input.setAttribute("data-type", "string");
+      }
+      if (f.required) input.setAttribute("data-required", "1");
+      inputs[f.name] = input;
+      rowEl.appendChild(input);
+      wrap.appendChild(rowEl);
+    });
+
+    var formActions = document.createElement("div");
+    formActions.className = "form-actions";
+    var cancel = document.createElement("button");
+    cancel.textContent = "Cancel";
+    cancel.addEventListener("click", function () {
+      lastResult = null;
+      render();
+      emitSize();
+    });
+    var submit = document.createElement("button");
+    submit.classList.add("primary");
+    submit.textContent = "Submit";
+    submit.addEventListener("click", function () {
+      var args = {};
+      var missing = [];
+      ordered.forEach(function (f) {
+        var inp = inputs[f.name];
+        if (!inp) return;
+        var dt = inp.getAttribute("data-type");
+        var raw = dt === "boolean" ? !!inp.checked : inp.value;
+        var empty = (dt !== "boolean") && (raw === "" || raw == null);
+        if (f.required && empty) {
+          missing.push(f.label || f.name);
+          return;
+        }
+        if (empty) return;
+        if (dt === "number") {
+          var n = Number(raw);
+          args[f.name] = isNaN(n) ? raw : n;
+        } else if (dt === "json") {
+          try { args[f.name] = JSON.parse(raw); }
+          catch (_) { args[f.name] = raw; }
+        } else {
+          args[f.name] = raw;
+        }
+      });
+      if (missing.length) {
+        alert("Please fill in: " + missing.join(", "));
+        return;
+      }
+      args._mcpAppsConfirmed = true;
+      submit.disabled = true;
+      cancel.disabled = true;
+      submit.textContent = "Submitting…";
+      fireToolsCall({ tool: payload.tool }, args, null).catch(function () {
+        submit.disabled = false;
+        cancel.disabled = false;
+        submit.textContent = "Submit";
+      });
+    });
+    formActions.appendChild(cancel);
+    formActions.appendChild(submit);
+    wrap.appendChild(formActions);
+    return wrap;
+  }
+
+  function inferFieldType(v) {
+    if (typeof v === "boolean") return "boolean";
+    if (typeof v === "number") return "number";
+    if (v && typeof v === "object") return "json";
+    return "string";
   }
 
   function fireToolsCall(action, args, btn) {

@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::generated::config::{
     Actions0Config, Config, Csp1Config, CspConfig, CustomBundles0Config, DefaultActions0Config,
-    Tools0Config,
+    FormFields0Config, Tools0Config,
 };
 
 #[derive(Debug, thiserror::Error)]
@@ -188,6 +188,21 @@ impl CspBlock {
 /// `CustomBundleCsp`.
 pub type CustomBundleCsp = CspBlock;
 
+/// Optional pre-call form field declared by the operator. Combined
+/// with the agent-supplied arguments to render the pre-call form for
+/// tools listed in `form_tools`.
+#[derive(Debug, Clone, Serialize)]
+pub struct FormField {
+    pub name: String,
+    pub label: String,
+    /// Widget kind. Mirrors the JSON shape the bundle understands:
+    /// `"string"`, `"number"`, `"boolean"`, `"json"`. Unknown values
+    /// fall back to `"string"`.
+    pub field_type: String,
+    pub placeholder: String,
+    pub required: bool,
+}
+
 #[derive(Debug, Clone)]
 pub struct ToolOverride {
     pub renderer: Option<RendererRef>,
@@ -199,6 +214,9 @@ pub struct ToolOverride {
     pub domain: Option<String>,
     /// Per-tool CSP. `None` means "use the global default".
     pub csp: Option<CspBlock>,
+    /// Optional fields surfaced on the pre-call form for tools listed
+    /// in `form_tools`. Empty when not configured.
+    pub form_fields: Vec<FormField>,
 }
 
 #[derive(Debug, Clone)]
@@ -217,6 +235,10 @@ pub struct PolicyConfig {
     pub tools: HashMap<String, ToolOverride>,
     pub default_actions: Vec<Action>,
     pub deny_tools: HashSet<String>,
+    /// Tool names that should render a pre-call confirmation form
+    /// instead of running immediately when the agent issues
+    /// `tools/call`.
+    pub form_tools: HashSet<String>,
     pub custom_bundles: HashMap<String, CustomBundle>,
     /// Default `_meta.ui.csp` block applied when a tool doesn't carry
     /// its own override.
@@ -261,6 +283,15 @@ impl PolicyConfig {
             .filter(|s| !s.is_empty())
             .collect();
 
+        let form_tools: HashSet<String> = raw
+            .form_tools
+            .as_deref()
+            .unwrap_or(&[])
+            .iter()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect();
+
         let tools = raw
             .tools
             .as_deref()
@@ -296,6 +327,7 @@ impl PolicyConfig {
             tools: tools_idx,
             default_actions,
             deny_tools,
+            form_tools,
             custom_bundles: custom_bundles_idx,
             csp,
             domain,
@@ -359,6 +391,26 @@ impl PolicyConfig {
             .get(tool)
             .map(|t| t.appify)
             .unwrap_or(true)
+    }
+
+    /// True when the tool should render a pre-call confirmation form
+    /// before the upstream call lands. Deny-listed tools are never
+    /// considered form tools — the deny list always wins.
+    pub fn is_form_tool(&self, tool: &str) -> bool {
+        if self.deny_tools.contains(tool) {
+            return false;
+        }
+        self.form_tools.contains(tool)
+    }
+
+    /// Optional pre-call form fields configured for the tool. Empty
+    /// when no per-tool override exists or the tool is not a form
+    /// tool.
+    pub fn form_fields_for(&self, tool: &str) -> &[FormField] {
+        match self.tools.get(tool) {
+            Some(t) => &t.form_fields,
+            None => &[],
+        }
     }
 
     /// Effective action list for a tool: per-tool actions first, then
@@ -442,6 +494,13 @@ fn parse_tool(
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty());
     let csp = raw.csp.as_ref().map(parse_per_tool_csp);
+    let form_fields = raw
+        .form_fields
+        .as_deref()
+        .unwrap_or(&[])
+        .iter()
+        .map(|f| parse_form_field(&name, f))
+        .collect::<Result<Vec<_>, _>>()?;
     Ok((
         name,
         ToolOverride {
@@ -450,8 +509,43 @@ fn parse_tool(
             actions,
             domain,
             csp,
+            form_fields,
         },
     ))
+}
+
+fn parse_form_field(rule: &str, raw: &FormFields0Config) -> Result<FormField, ConfigError> {
+    let name = raw.name.trim().to_string();
+    if name.is_empty() {
+        return Err(ConfigError::Tool(
+            rule.into(),
+            "formField with empty 'name'".into(),
+        ));
+    }
+    let label = raw
+        .label
+        .as_deref()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| name.clone());
+    let field_type = raw
+        .field_type
+        .as_deref()
+        .map(|s| s.trim().to_ascii_lowercase())
+        .filter(|s| matches!(s.as_str(), "string" | "number" | "boolean" | "json"))
+        .unwrap_or_else(|| "string".to_string());
+    let placeholder = raw
+        .placeholder
+        .clone()
+        .unwrap_or_default();
+    let required = raw.required.unwrap_or(false);
+    Ok(FormField {
+        name,
+        label,
+        field_type,
+        placeholder,
+        required,
+    })
 }
 
 fn parse_action(rule: &str, raw: &Actions0Config) -> Result<Action, ConfigError> {
@@ -633,7 +727,7 @@ fn parse_top_level_csp(raw: &CspConfig) -> CspBlock {
 mod tests {
     use super::*;
     use crate::generated::config::{
-        Actions0Config, Config, CustomBundles0Config, Tools0Config,
+        Actions0Config, Config, CustomBundles0Config, FormFields0Config, Tools0Config,
     };
 
     fn empty_config() -> Config {
@@ -645,6 +739,7 @@ mod tests {
             tools: None,
             default_actions: None,
             deny_tools: None,
+            form_tools: None,
             custom_bundles: None,
             csp: None,
             domain: None,
@@ -678,6 +773,49 @@ mod tests {
     }
 
     #[test]
+    fn form_tools_membership_and_fields() {
+        let cfg = PolicyConfig::from_raw(&Config {
+            form_tools: Some(vec!["submit_order".into()]),
+            tools: Some(vec![Tools0Config {
+                name: "submit_order".into(),
+                renderer: None,
+                appify: None,
+                actions: None,
+                csp: None,
+                domain: None,
+                form_fields: Some(vec![FormFields0Config {
+                    name: "deliveryNotes".into(),
+                    label: Some("Delivery notes".into()),
+                    field_type: Some("string".into()),
+                    placeholder: Some("Optional".into()),
+                    required: Some(false),
+                }]),
+            }]),
+            ..empty_config()
+        })
+        .unwrap();
+        assert!(cfg.is_form_tool("submit_order"));
+        assert!(!cfg.is_form_tool("get_inventory"));
+        let fields = cfg.form_fields_for("submit_order");
+        assert_eq!(fields.len(), 1);
+        assert_eq!(fields[0].name, "deliveryNotes");
+        assert_eq!(fields[0].label, "Delivery notes");
+        assert_eq!(fields[0].field_type, "string");
+        assert!(!fields[0].required);
+    }
+
+    #[test]
+    fn deny_list_overrides_form_tools() {
+        let cfg = PolicyConfig::from_raw(&Config {
+            form_tools: Some(vec!["submit_order".into()]),
+            deny_tools: Some(vec!["submit_order".into()]),
+            ..empty_config()
+        })
+        .unwrap();
+        assert!(!cfg.is_form_tool("submit_order"));
+    }
+
+    #[test]
     fn rejects_unknown_renderer_name() {
         let err = PolicyConfig::from_raw(&Config {
             tools: Some(vec![Tools0Config {
@@ -687,6 +825,7 @@ mod tests {
                 actions: None,
                 csp: None,
                 domain: None,
+                form_fields: None,
             }]),
             ..empty_config()
         })
@@ -709,6 +848,7 @@ mod tests {
                 actions: None,
                 csp: None,
                 domain: None,
+                form_fields: None,
             }]),
             ..empty_config()
         })
@@ -750,6 +890,7 @@ mod tests {
                 }]),
                 csp: None,
                 domain: None,
+                form_fields: None,
             }]),
             ..empty_config()
         })
@@ -788,6 +929,7 @@ mod tests {
                 ]),
                 csp: None,
                 domain: None,
+                form_fields: None,
             }]),
             ..empty_config()
         })
@@ -814,6 +956,7 @@ mod tests {
                 }]),
                 csp: None,
                 domain: None,
+                form_fields: None,
             }]),
             ..empty_config()
         })

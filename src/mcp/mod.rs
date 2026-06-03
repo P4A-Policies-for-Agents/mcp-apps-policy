@@ -612,6 +612,7 @@ mod tests {
             tools: None,
             default_actions: None,
             deny_tools: None,
+            form_tools: None,
             custom_bundles: None,
             csp: None,
             domain: None,
@@ -730,6 +731,7 @@ mod tests {
                 }]),
                 csp: None,
                 domain: None,
+                form_fields: None,
             }]),
             ..raw_empty()
         })
@@ -800,6 +802,7 @@ mod tests {
                     base_uri_domains: None,
                 }),
                 domain: Some("special.example.com".into()),
+                form_fields: None,
             }]),
             ..raw_empty()
         })
@@ -971,6 +974,7 @@ mod tests {
                 }]),
                 csp: None,
                 domain: None,
+                form_fields: None,
             }]),
             ..raw_empty()
         })
@@ -1012,6 +1016,7 @@ mod tests {
                 }]),
                 csp: None,
                 domain: None,
+                form_fields: None,
             }]),
             ..raw_empty()
         })
@@ -1053,6 +1058,7 @@ mod tests {
                 }]),
                 csp: None,
                 domain: None,
+                form_fields: None,
             }]),
             ..raw_empty()
         })
@@ -1092,6 +1098,7 @@ mod tests {
                 }]),
                 csp: None,
                 domain: None,
+                form_fields: None,
             }]),
             ..raw_empty()
         })
@@ -1121,6 +1128,7 @@ mod tests {
                 actions: None,
                 csp: None,
                 domain: None,
+                form_fields: None,
             }]),
             ..raw_empty()
         })
@@ -1154,6 +1162,7 @@ mod tests {
                 actions: None,
                 csp: None,
                 domain: None,
+                form_fields: None,
             }]),
             ..raw_empty()
         })
@@ -1179,6 +1188,7 @@ mod tests {
             tools: None,
             default_actions: None,
             deny_tools: None,
+            form_tools: None,
             custom_bundles: None,
             csp: None,
             domain: None,

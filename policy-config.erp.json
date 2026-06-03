@@ -28,6 +28,19 @@
     {
       "name": "submit_order",
       "renderer": "card",
+      "formFields": [
+        {
+          "name": "deliveryNotes",
+          "label": "Delivery notes",
+          "type": "string",
+          "placeholder": "Optional"
+        },
+        {
+          "name": "expedite",
+          "label": "Expedite shipping",
+          "type": "boolean"
+        }
+      ],
       "actions": [
         {
           "tool": "submit_delivery",
@@ -45,6 +58,7 @@
 
   "defaultActions": [],
   "denyTools": [],
+  "formTools": ["submit_order"],
   "customBundles": [],
 
   "previewMode": false,

@@ -128,6 +128,36 @@ bundle so the policy works without external hosting.
   `postMessage` `targetOrigin` to it. Pre-0.1.11 we sent every
   message with `targetOrigin: "*"`, which MCP Inspector's strict
   cross-origin isolation could drop.
+- **Pre-call confirmation forms (0.1.23).** New top-level
+  `formTools[]` array. When the agent issues `tools/call` for a
+  listed tool, the policy intercepts the request on the way in and
+  replies locally with a synthetic `structuredContent` of
+  `{_mcpAppsForm: true, tool, values: <agent args>, fields:
+  <declared>}`. The embedded bundle recognises the marker and
+  renders a confirmation form pre-filled with the agent's
+  arguments, plus any operator-declared optional fields from
+  `tools[].formFields[]` (`name`/`label`/`type`/`placeholder`/
+  `required`, types `string`/`number`/`boolean`/`json`). Submit
+  re-issues `tools/call` with the merged arguments plus an internal
+  `_mcpAppsConfirmed: true` marker; the policy strips the marker
+  and forwards the confirmed call upstream. Cancel clears the
+  iframe without calling the tool. Closes the long-standing gap
+  where "Create Order for MULETEST0" gave the user no chance to set
+  optional fields before the agent submitted, and adds a final
+  confirmation step for destructive tools (Update / Delete /
+  Submit) without changing the agent's perception of the call.
+  Deny-listed tools are never form tools — the deny list always
+  wins. Implements **v0.2 #1**.
+- **CSP / formFields are conditional in the Anypoint editor (0.1.23).**
+  Removed `default: {}` / `default: []` from `csp:` and the per-tool
+  `csp:` / `formFields:` arrays in `gcl.yaml`. Anypoint's policy
+  editor used to render four always-visible "Optional" rows
+  (`connectDomains`, `resourceDomains`, `frameDomains`,
+  `baseUriDomains`) under a permanent CSP block; without defaults,
+  the UI collapses these to a single "Add" affordance and the form
+  is dramatically less noisy for operators who don't need them.
+  Pure UX change — the wire format is unchanged and existing
+  configs keep working.
 - **Prompt-mode actions (0.1.18–0.1.21).** Actions can declare
   `mode: "prompt"` with a `prompt` template (`${field}` / `${row}` /
   `${rows[].Field}` substitution). On click, the bundle resolves the
@@ -194,24 +224,19 @@ Goal: reduce config surface for operators by reading what the MCP
 server already advertises, and close the highest-leverage UX gaps in
 the embedded bundle.
 
-Items below are listed in priority order. **(1)** is the headline
-feature — it unblocks the "let me edit optional fields before the
-agent submits" use case that today has no good answer. **(2)–(4)**
-and **(6)/(8)** are a low-cost UX bundle that together make the
-demos feel finished rather than prototype.
+Items below are listed in priority order. **(1)** (pre-call forms)
+shipped in 0.1.23 — see the v0.1 Shipped list. The next-priority
+items are **(2)–(4)** plus **(6)/(8)**, a low-cost UX bundle that
+together make the demos feel finished rather than prototype.
 
-1. **Pre-call forms via `inputSchema`.** New `formTools: [...]`
-   config: when the agent decides to call a listed tool, the policy
-   intercepts the first `tools/call`, returns a synthetic
-   `structuredContent` rendering the tool's `inputSchema` as a form
-   pre-filled with the agent's args, exposes optional fields, and
-   the form's submit re-issues the real call via `ui/message`. No
-   server changes, no new tool, no convention the MCP server has
-   to follow. Closes the gap where "Create Order for MULETEST0"
-   gives the user no chance to set optional fields before the
-   agent submits. Cost: medium — needs a "first call vs.
-   confirmation call" state machine and careful handling of the
-   agent's perception of the first call.
+1. **`inputSchema`-driven form fields (next iteration of formTools).**
+   0.1.23 ships `formTools[]` with operator-declared `formFields[]`.
+   The next step is to read the tool's `inputSchema` from
+   `tools/list` and synthesise the form fields automatically —
+   required `*`, type-correct inputs, enum dropdowns — so operators
+   don't have to repeat what the schema already says. Operator
+   `formFields[]` can still override or extend the schema-derived
+   set. Cost: small.
 2. **Schema-aware cells in the table renderer.** Today every cell is
    text/JSON. Reading `outputSchema` (or `format` hints in the values
    themselves) to render currency, dates, links, enums, and

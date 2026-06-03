@@ -85,9 +85,18 @@ spec:
         (c) When true, the policy injects suggested next-tool actions
         into `tools/call` results based on the matching `tools[]` /
         `defaultActions` entries. The embedded UI renders these as
-        buttons. On click, the iframe issues `tools/call` for the
-        chosen tool through the host (the host opens the target tool's
-        UI in turn — full app-to-app navigation, no upstream changes).
+        buttons. What clicking the button does depends on the action's
+        `mode`:
+          - `call`   : the iframe issues `tools/call` for the target
+                       tool directly through the host.
+          - `form`   : the iframe opens an inline edit form, then
+                       issues `tools/call` on submit.
+          - `prompt` : the iframe sends a chat message back to the host
+                       via SEP-1865 `ui/message` so the agent re-decides
+                       whether to call the underlying tool. Keeps the
+                       conversation chain visible and prevents
+                       out-of-band tool calls.
+        No upstream changes are required for any of the three modes.
 
     # ------------------------------------------------------------------
     # Bundle / renderer selection
@@ -119,36 +128,32 @@ spec:
     # ------------------------------------------------------------------
     csp:
       type: object
-      default: {}
       description: |
-        Default CSP allowlists emitted as `_meta.ui.csp` on every
+        Optional CSP allowlists emitted as `_meta.ui.csp` on every
         appified tool. ChatGPT's app-submission validator rejects
         templates without a CSP block; Claude.ai ignores the field
         when not relevant. Spec shape (SEP-1865 / Apps docs):
         `connectDomains`, `resourceDomains`, `frameDomains`,
         `baseUriDomains`. Each entry is a host or origin string
-        (e.g. `https://api.salesforce.com`). Empty arrays are valid
-        and tell the host "no extra domains needed beyond the host
-        defaults".
+        (e.g. `https://api.salesforce.com`). Leave the section blank
+        unless your bundle actually needs to reach a specific origin
+        — the host's default restrictive CSP is fine for the embedded
+        renderer.
       properties:
         connectDomains:
           type: array
-          default: []
           items:
             type: string
         resourceDomains:
           type: array
-          default: []
           items:
             type: string
         frameDomains:
           type: array
-          default: []
           items:
             type: string
         baseUriDomains:
           type: array
-          default: []
           items:
             type: string
     domain:
@@ -206,33 +211,76 @@ spec:
               `<toolName>.mcp-apps-policy.local`.
           csp:
             type: object
-            default: {}
             description: |
-              Per-tool override for `_meta.ui.csp`. Same shape as the
-              top-level `csp`. When set, replaces the global default
-              entirely (no array merging) so an operator can declare
-              tighter or looser allowlists for a specific tool.
+              Optional per-tool override for `_meta.ui.csp`. Same shape
+              as the top-level `csp`. When set, replaces the global
+              default entirely (no array merging) so an operator can
+              declare tighter or looser allowlists for a specific tool.
             properties:
               connectDomains:
                 type: array
-                default: []
                 items:
                   type: string
               resourceDomains:
                 type: array
-                default: []
                 items:
                   type: string
               frameDomains:
                 type: array
-                default: []
                 items:
                   type: string
               baseUriDomains:
                 type: array
-                default: []
                 items:
                   type: string
+          formFields:
+            type: array
+            default: []
+            description: |
+              Optional fields to expose on the pre-call form when this
+              tool is listed in the top-level `formTools[]`. Each entry
+              describes a field the agent's first call may not have
+              populated — e.g. an optional `quantity`, `deliveryDate`,
+              or `note`. Fields the agent already supplied are always
+              shown (pre-filled); these entries add the fields the
+              agent left out, so the user can complete the request
+              before the real call lands. Ignored when the tool is not
+              in `formTools[]`.
+            items:
+              type: object
+              required:
+                - name
+              properties:
+                name:
+                  type: string
+                  description: Argument name passed to the upstream tool.
+                label:
+                  type: string
+                  default: ""
+                  description: |
+                    User-facing label. Defaults to `name` if blank.
+                type:
+                  type: string
+                  enum:
+                    - string
+                    - number
+                    - boolean
+                    - json
+                  default: string
+                  description: |
+                    Input widget. `string` is a single-line input,
+                    `number` a numeric input, `boolean` a checkbox,
+                    `json` a textarea parsed as JSON on submit.
+                placeholder:
+                  type: string
+                  default: ""
+                  description: Hint shown when the field is empty.
+                required:
+                  type: boolean
+                  default: false
+                  description: |
+                    When true, the form's Submit button is disabled
+                    until the field has a non-empty value.
           actions:
             type: array
             default: []
@@ -367,6 +415,35 @@ spec:
             default: ""
 
     # ------------------------------------------------------------------
+    # Pre-call forms
+    # ------------------------------------------------------------------
+    formTools:
+      type: array
+      default: []
+      description: |
+        Tool names that should open a confirmation form *before* the
+        upstream tool runs. When the agent issues `tools/call` for a
+        listed tool, the policy intercepts the request and returns a
+        synthetic result whose `structuredContent` is rendered by the
+        embedded bundle as an editable form pre-filled with the agent's
+        arguments. The user reviews / edits / completes the form and
+        clicks Submit; the bundle re-issues `tools/call` with a
+        confirmation marker, which the policy strips before forwarding
+        the call upstream. The agent only sees the eventual *real*
+        result, so no infinite loop.
+
+        Use this for "Create X" / "Update X" flows where the agent's
+        first guess is incomplete but the operator wants the user to
+        fill in optional fields before the call lands. Combine with
+        per-tool `formFields[]` to expose schema-only fields the agent
+        didn't touch (e.g. `quantity`, `deliveryDate`).
+
+        Empty by default — when not listed here, `tools/call` flows
+        through unchanged.
+      items:
+        type: string
+
+    # ------------------------------------------------------------------
     # Deny list
     # ------------------------------------------------------------------
     denyTools:
@@ -411,7 +488,6 @@ spec:
               or whitelisted via `csp.resourceDomains`.
           csp:
             type: object
-            default: {}
             description: |
               Optional CSP overrides emitted as `_meta.ui.csp`. Same
               shape as the spec: `connectDomains`, `resourceDomains`,
@@ -419,22 +495,18 @@ spec:
             properties:
               connectDomains:
                 type: array
-                default: []
                 items:
                   type: string
               resourceDomains:
                 type: array
-                default: []
                 items:
                   type: string
               frameDomains:
                 type: array
-                default: []
                 items:
                   type: string
               baseUriDomains:
                 type: array
-                default: []
                 items:
                   type: string
 
