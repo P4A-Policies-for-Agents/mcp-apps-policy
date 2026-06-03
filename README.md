@@ -302,6 +302,14 @@ The policy only modifies *responses* (and the synthesised
   - `${rows}` — the array of selected rows (multi only).
   - `${rows[].Field}` — project `Field` across the selected rows
     (multi only).
+- `formMode` — `"auto"` (default) or `"skip"`. Per-tool override for
+  the pre-call form behaviour. `auto` is the normal flow described
+  in the [Pre-call confirmation forms](#pre-call-confirmation-forms-formtools)
+  section below. `skip` opts the tool out of interception even when
+  it is listed in `formTools[]` — useful when a prior `prompt`-mode
+  action already gathered consent ("Order this material" → user
+  confirms in chat → agent calls `submit_order`; a second form
+  would be redundant).
 - `formFields[]` — only honoured when the tool name is also listed
   in the top-level `formTools[]`. Each entry declares an extra field
   to surface on the pre-call form *in addition to* the keys the
@@ -342,13 +350,23 @@ this flow:
 3. The embedded bundle recognises the marker and renders a form
    pre-filled with the agent's values, plus any optional fields you
    declared in `tools[].formFields[]`.
-4. On Submit, the bundle re-issues `tools/call` with the merged
+4. On Submit, the bundle posts a chat prompt via SEP-1865
+   `ui/message` asking the agent to call the tool with the merged
    arguments and an internal `_mcpAppsConfirmed: true` marker.
-5. The policy strips the marker and forwards the confirmed call to
-   the upstream MCP server. The tool runs once, with the user's
-   approved arguments.
-6. The agent sees a single `tools/call` round-trip — the
-   interception is invisible from its perspective.
+   (Issuing `tools/call` from inside the iframe doesn't work on
+   every host — Claude.ai never delivers the result back, so the
+   form would hang on -32001. Going through chat is the only path
+   that works on every host.)
+5. The agent issues the confirmed `tools/call`. The policy strips
+   the marker and forwards upstream. The tool runs once, with the
+   user's approved arguments.
+6. The host pushes the tool-result back through the normal channel;
+   the iframe re-renders with the real result.
+
+If a tool already has a prior chat-confirmation step (e.g. an
+"Order this material" `prompt`-mode action upstream), set
+`tools[].formMode: "skip"` to bypass the form entirely on that
+specific tool.
 
 Cancelling clears the in-iframe state without making the call;
 nothing reaches the upstream.
@@ -501,7 +519,7 @@ curl -s http://localhost:8081/mcp \
 curl -s http://localhost:8081/mcp \
   -H 'Content-Type: application/json' \
   -d '{"jsonrpc":"2.0","id":2,"method":"resources/read",
-       "params":{"uri":"ui://mcp-apps-policy/v0.1.27/get_inventory"}}' | jq
+       "params":{"uri":"ui://mcp-apps-policy/v0.1.30/get_inventory"}}' | jq
 ```
 
 ---

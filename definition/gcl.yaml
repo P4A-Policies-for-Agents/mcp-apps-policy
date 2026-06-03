@@ -233,6 +233,25 @@ spec:
                 type: array
                 items:
                   type: string
+          formMode:
+            type: string
+            enum:
+              - auto
+              - skip
+            default: auto
+            description: |
+              Controls the pre-call form behaviour when this tool is
+              listed in the top-level `formTools[]`.
+              - `auto` (default): the policy intercepts the agent's first
+                `tools/call` and renders an in-iframe confirmation form.
+                On Submit the bundle posts a chat prompt via `ui/message`
+                asking the agent to re-issue the call with the
+                `_mcpAppsConfirmed` marker; the policy strips the marker
+                and forwards upstream.
+              - `skip`: the policy does NOT intercept. Use this when the
+                user has already confirmed the call through a prior
+                `prompt`-mode action ("Order this material") and you
+                don't want a second confirmation step.
           formFields:
             type: array
             default: []

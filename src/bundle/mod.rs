@@ -117,6 +117,7 @@ mod tests {
                 csp: None,
                 domain: None,
                 form_fields: None,
+                form_mode: None,
             }]),
             ..empty_raw()
         })

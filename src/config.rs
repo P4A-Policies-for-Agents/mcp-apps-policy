@@ -188,6 +188,36 @@ impl CspBlock {
 /// `CustomBundleCsp`.
 pub type CustomBundleCsp = CspBlock;
 
+/// Per-tool override for how the pre-call form should behave.
+/// - `Auto` is the default: the policy intercepts and renders the
+///   form.
+/// - `Skip` lets the agent's call pass through unmodified — useful
+///   when the user has already confirmed via a prior `prompt`-mode
+///   action and a second confirmation step would be redundant.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum FormMode {
+    Auto,
+    Skip,
+}
+
+impl FormMode {
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.trim() {
+            "" | "auto" => Some(Self::Auto),
+            "skip" => Some(Self::Skip),
+            _ => None,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::Skip => "skip",
+        }
+    }
+}
+
 /// Optional pre-call form field declared by the operator. Combined
 /// with the agent-supplied arguments to render the pre-call form for
 /// tools listed in `form_tools`.
@@ -217,6 +247,9 @@ pub struct ToolOverride {
     /// Optional fields surfaced on the pre-call form for tools listed
     /// in `form_tools`. Empty when not configured.
     pub form_fields: Vec<FormField>,
+    /// Per-tool override for the pre-call form behaviour. Defaults to
+    /// `Auto` when unset.
+    pub form_mode: FormMode,
 }
 
 #[derive(Debug, Clone)]
@@ -395,12 +428,28 @@ impl PolicyConfig {
 
     /// True when the tool should render a pre-call confirmation form
     /// before the upstream call lands. Deny-listed tools are never
-    /// considered form tools — the deny list always wins.
+    /// considered form tools — the deny list always wins. Tools with
+    /// per-tool `formMode: skip` opt out of interception even when
+    /// listed in `formTools[]`.
     pub fn is_form_tool(&self, tool: &str) -> bool {
         if self.deny_tools.contains(tool) {
             return false;
         }
-        self.form_tools.contains(tool)
+        if !self.form_tools.contains(tool) {
+            return false;
+        }
+        match self.form_mode_for(tool) {
+            FormMode::Auto => true,
+            FormMode::Skip => false,
+        }
+    }
+
+    /// Returns the per-tool `formMode`, defaulting to `Auto`.
+    pub fn form_mode_for(&self, tool: &str) -> FormMode {
+        self.tools
+            .get(tool)
+            .map(|t| t.form_mode)
+            .unwrap_or(FormMode::Auto)
     }
 
     /// Optional pre-call form fields configured for the tool. Empty
@@ -501,6 +550,20 @@ fn parse_tool(
         .iter()
         .map(|f| parse_form_field(&name, f))
         .collect::<Result<Vec<_>, _>>()?;
+    let form_mode = match raw
+        .form_mode
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        None => FormMode::Auto,
+        Some(s) => FormMode::parse(s).ok_or_else(|| {
+            ConfigError::Tool(
+                name.clone(),
+                format!("invalid formMode '{s}' (use auto|skip)"),
+            )
+        })?,
+    };
     Ok((
         name,
         ToolOverride {
@@ -510,6 +573,7 @@ fn parse_tool(
             domain,
             csp,
             form_fields,
+            form_mode,
         },
     ))
 }
@@ -790,6 +854,7 @@ mod tests {
                     placeholder: Some("Optional".into()),
                     required: Some(false),
                 }]),
+                form_mode: None,
             }]),
             ..empty_config()
         })
@@ -802,6 +867,27 @@ mod tests {
         assert_eq!(fields[0].label, "Delivery notes");
         assert_eq!(fields[0].field_type, "string");
         assert!(!fields[0].required);
+    }
+
+    #[test]
+    fn form_mode_skip_disables_form_interception() {
+        let cfg = PolicyConfig::from_raw(&Config {
+            form_tools: Some(vec!["submit_order".into()]),
+            tools: Some(vec![Tools0Config {
+                name: "submit_order".into(),
+                renderer: None,
+                appify: None,
+                actions: None,
+                csp: None,
+                domain: None,
+                form_fields: None,
+                form_mode: Some("skip".into()),
+            }]),
+            ..empty_config()
+        })
+        .unwrap();
+        assert_eq!(cfg.form_mode_for("submit_order"), FormMode::Skip);
+        assert!(!cfg.is_form_tool("submit_order"));
     }
 
     #[test]
@@ -826,6 +912,7 @@ mod tests {
                 csp: None,
                 domain: None,
                 form_fields: None,
+                form_mode: None,
             }]),
             ..empty_config()
         })
@@ -849,6 +936,7 @@ mod tests {
                 csp: None,
                 domain: None,
                 form_fields: None,
+                form_mode: None,
             }]),
             ..empty_config()
         })
@@ -891,6 +979,7 @@ mod tests {
                 csp: None,
                 domain: None,
                 form_fields: None,
+                form_mode: None,
             }]),
             ..empty_config()
         })
@@ -930,6 +1019,7 @@ mod tests {
                 csp: None,
                 domain: None,
                 form_fields: None,
+                form_mode: None,
             }]),
             ..empty_config()
         })
@@ -957,6 +1047,7 @@ mod tests {
                 csp: None,
                 domain: None,
                 form_fields: None,
+                form_mode: None,
             }]),
             ..empty_config()
         })

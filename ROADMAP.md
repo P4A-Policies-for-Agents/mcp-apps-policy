@@ -128,21 +128,44 @@ bundle so the policy works without external hosting.
   `postMessage` `targetOrigin` to it. Pre-0.1.11 we sent every
   message with `targetOrigin: "*"`, which MCP Inspector's strict
   cross-origin isolation could drop.
-- **Form submit no longer hangs on hosts that deliver results via
-  notification (0.1.27).** The pre-call form (`formTools[]`) and the
-  single-row inline Edit form used to await `fireToolsCall`'s
-  JSON-RPC reply before tearing down the form. Some hosts (notably
-  Claude.ai) deliver the upstream tool result via the
-  `ui/notifications/tool-result` notification path *instead of* as a
-  JSON-RPC response — so the iframe's pending Promise never
-  resolved and the user saw "Submitting…" until the host's MCP
-  timeout fired (`MCP error -32001: Request timed out`). Fix: both
-  forms now fire-and-replace — submit dismisses the form
-  immediately and shows a "Submitted. Waiting for the upstream
-  response…" notice; `render()` takes over when the next
-  tool-result arrives via either path. Functional behaviour is
-  identical on hosts that *do* reply to the request; the host's
-  reply triggers `render()` directly.
+- **Form Submit posts via `ui/message`, plus `formMode: skip` opt-out
+  (0.1.30).** Issuing `tools/call` from inside the iframe doesn't
+  work on every host — Claude.ai never delivers the result back, so
+  the form would hang on `MCP error -32001: Request timed out`. New
+  Submit path posts a chat prompt via SEP-1865 `ui/message` asking
+  the agent to call the tool with the merged args plus
+  `_mcpAppsConfirmed: true`; the policy strips the marker and
+  forwards upstream, the host pushes the tool-result back through
+  the normal channel. Same path Edit/Delete `prompt`-mode actions
+  use today, so works on every host. Also adds per-tool
+  `formMode: "auto" | "skip"`. `skip` opts the tool out of
+  `formTools[]` interception entirely — set on `submit_order` in
+  the ERP demo because the upstream `get_inventory` "Order this
+  material" action already gathers consent in chat, so a second
+  form is redundant noise.
+- **Revert fire-and-replace form submit; revert CRM Edit to prompt
+  mode (0.1.29).** 0.1.27's fire-and-replace logic for the pre-call
+  form (`formTools[]`) and the single-row inline Edit form turned
+  out to misdiagnose the host: on this user's host the iframe-side
+  `tools/call` does receive a JSON-RPC reply (so the prior await
+  path worked), and the new "Submitted — waiting…" notice was
+  staying stuck because the host *also* funnels confirmed calls
+  through the agent which then re-issues the call as a fresh chat
+  turn. Restored the original `fireToolsCall().then(close form)`
+  behaviour so ERP `submit_order` confirmations return to working.
+  Also reverted CRM `update_accounts` Edit from `mode: "form" +
+  select: "multi"` (which used the bundle's chat-mode submit path
+  and emitted a diff-style prompt) back to plain `mode: "prompt"
+  + select: "multi"` — the agent now sees a generic "Please
+  update… I'd like to change the following fields:" prompt and
+  formats the upstream `update_accounts` call itself with the
+  `{objects: [...]}` wrapper CRM expects, instead of the diff
+  prompt that nudged the agent toward a flat-row payload (which
+  reproduced *"Cannot invoke java.util.List.size() because
+  'objects' is null"*). The multi-row form code path (Prev/Next
+  pages, per-row staged edits, diff prompt on Save all) stays in
+  the bundle for operators who want it on tools that accept
+  flat-row updates — it just isn't the default for CRM anymore.
 - **Nested arrays/objects render as mini-tables in cards and table
   cells (0.1.27).** Previously a field whose value was an array of
   objects (e.g. `items: [{exception: null, payload: {...}, ...}, ...]`

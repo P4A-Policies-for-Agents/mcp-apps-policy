@@ -732,6 +732,7 @@ mod tests {
                 csp: None,
                 domain: None,
                 form_fields: None,
+                form_mode: None,
             }]),
             ..raw_empty()
         })
@@ -803,6 +804,7 @@ mod tests {
                 }),
                 domain: Some("special.example.com".into()),
                 form_fields: None,
+                form_mode: None,
             }]),
             ..raw_empty()
         })
@@ -975,6 +977,7 @@ mod tests {
                 csp: None,
                 domain: None,
                 form_fields: None,
+                form_mode: None,
             }]),
             ..raw_empty()
         })
@@ -1017,6 +1020,7 @@ mod tests {
                 csp: None,
                 domain: None,
                 form_fields: None,
+                form_mode: None,
             }]),
             ..raw_empty()
         })
@@ -1059,6 +1063,7 @@ mod tests {
                 csp: None,
                 domain: None,
                 form_fields: None,
+                form_mode: None,
             }]),
             ..raw_empty()
         })
@@ -1099,6 +1104,7 @@ mod tests {
                 csp: None,
                 domain: None,
                 form_fields: None,
+                form_mode: None,
             }]),
             ..raw_empty()
         })
@@ -1129,6 +1135,7 @@ mod tests {
                 csp: None,
                 domain: None,
                 form_fields: None,
+                form_mode: None,
             }]),
             ..raw_empty()
         })
@@ -1163,6 +1170,7 @@ mod tests {
                 csp: None,
                 domain: None,
                 form_fields: None,
+                form_mode: None,
             }]),
             ..raw_empty()
         })

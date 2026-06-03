@@ -21,8 +21,8 @@
           "tool": "update_accounts",
           "label": "Edit",
           "select": "multi",
-          "mode": "form",
-          "prompt": "Please update the following accounts:\n${edits}\nConfirm with me first."
+          "mode": "prompt",
+          "prompt": "Please update the following accounts: ${rows[].Name} (Ids: ${rows[].Id}). I'd like to change the following fields: "
         },
         {
           "tool": "delete_accounts",

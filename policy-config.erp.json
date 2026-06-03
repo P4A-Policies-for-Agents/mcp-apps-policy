@@ -28,6 +28,7 @@
     {
       "name": "submit_order",
       "renderer": "card",
+      "formMode": "skip",
       "formFields": [
         {
           "name": "deliveryNotes",

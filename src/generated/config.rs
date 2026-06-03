@@ -85,6 +85,8 @@ pub struct Tools0Config {
     pub domain: Option<String>,
     #[serde(alias = "formFields")]
     pub form_fields: Option<Vec<FormFields0Config>>,
+    #[serde(alias = "formMode")]
+    pub form_mode: Option<String>,
     #[serde(alias = "name")]
     pub name: String,
     #[serde(alias = "renderer")]

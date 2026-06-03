@@ -1090,14 +1090,12 @@
       } else {
         args = edited;
       }
-      // Fire-and-replace (same reasoning as buildPreCallForm submit):
-      // some hosts deliver the upstream result via tool-result
-      // notification, not as a JSON-RPC reply, so awaiting here hangs.
-      fireToolsCall(action, args, originBtn).catch(function () {
-        showSubmittedNotice("Submission failed — re-issue the request from chat.");
+      fireToolsCall(action, args, originBtn).then(function () {
+        if (overlay.parentNode) document.body.removeChild(overlay);
+      }).catch(function () {
+        submit.disabled = false;
+        cancel.disabled = false;
       });
-      if (overlay.parentNode) document.body.removeChild(overlay);
-      showSubmittedNotice("Submitted. Waiting for the upstream response…");
     });
 
     overlay.appendChild(card);
@@ -1304,21 +1302,40 @@
         return;
       }
       args._mcpAppsConfirmed = true;
+      // Some hosts (Claude.ai) don't deliver the upstream tool result
+      // back to the iframe when `tools/call` is issued from inside —
+      // neither as a JSON-RPC reply nor as a `tool-result`
+      // notification — so awaiting fireToolsCall() hangs until the
+      // host's MCP timeout fires (-32001 Request timed out).
+      //
+      // Workaround that works on every host: hand the confirmed call
+      // back to the agent via `ui/message`. The agent re-issues
+      // `tools/call`, the policy sees the `_mcpAppsConfirmed` marker
+      // and forwards upstream, the host pushes the tool-result back
+      // through the normal channel, render() takes over.
+      var prompt = buildFormSubmitPrompt(payload.tool, args);
       submit.disabled = true;
       cancel.disabled = true;
-      submit.textContent = "Submitting…";
-      // Fire-and-replace: some hosts (Claude.ai) deliver the upstream
-      // tool result as a `ui/notifications/tool-result` notification
-      // instead of resolving the JSON-RPC request, so awaiting the
-      // promise here would hang until the host's MCP timeout (-32001).
-      // We swap the form for a "submitted" notice immediately;
-      // `render()` takes over when the next tool-result arrives via
-      // either the request reply or the notification.
-      fireToolsCall({ tool: payload.tool }, args, null).catch(function () {
-        // If the host *does* error out the request, surface it.
-        showSubmittedNotice("Submission failed — the agent did not receive a response. Re-issue the request from chat.");
+      submit.textContent = "Sending…";
+      postMessageToHost(prompt).then(function (res) {
+        if (res && res.isError) {
+          submit.textContent = "Send failed";
+          submit.disabled = false;
+          cancel.disabled = false;
+          showFormFallbackPanel(prompt);
+          return;
+        }
+        // Successful post — clear the form so the next tool-result
+        // (the agent's confirmed call) renders fresh.
+        lastResult = null;
+        render();
+        emitSize();
+      }).catch(function () {
+        submit.textContent = "Not supported — copy below";
+        submit.disabled = false;
+        cancel.disabled = false;
+        showFormFallbackPanel(prompt);
       });
-      showSubmittedNotice("Submitted. Waiting for the upstream response…");
     });
     formActions.appendChild(cancel);
     formActions.appendChild(submit);
@@ -1326,21 +1343,31 @@
     return wrap;
   }
 
-  // Replace the iframe content with a transient "submitted" notice.
-  // We don't try to track the in-flight tools/call: the next tool-result
-  // (delivered as either a request reply or a tool-result notification)
-  // will trigger render() and replace this notice automatically.
-  function showSubmittedNotice(message) {
-    var root = document.getElementById("root");
-    if (!root) return;
-    root.innerHTML = "";
-    var card = document.createElement("div");
-    card.className = "card";
-    var status = document.createElement("div");
-    status.className = "subtitle";
-    status.textContent = message;
-    card.appendChild(status);
-    root.appendChild(card);
+  // Build the chat prompt the agent reads on Submit. The
+  // `_mcpAppsConfirmed: true` flag inside the JSON tells the policy
+  // (server-side) that the user has approved this call; the policy
+  // strips the flag and forwards upstream. Without the flag the
+  // policy would intercept again with another form.
+  function buildFormSubmitPrompt(toolName, args) {
+    var pretty;
+    try { pretty = JSON.stringify(args, null, 2); }
+    catch (_) { pretty = String(args); }
+    return [
+      "I confirmed the form. Please call the tool `" + toolName +
+        "` exactly once with the arguments below — do not modify or",
+      "drop any field, including `_mcpAppsConfirmed`. Do not ask for",
+      "further confirmation.",
+      "",
+      "```json",
+      pretty,
+      "```"
+    ].join("\n");
+  }
+
+  // When ui/message isn't supported, surface the prompt so the user
+  // can copy it manually.
+  function showFormFallbackPanel(prompt) {
+    showPromptPanel(prompt);
     emitSize();
   }
 
