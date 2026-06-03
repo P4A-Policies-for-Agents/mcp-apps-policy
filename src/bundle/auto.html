@@ -608,7 +608,17 @@
       var idx = selection.selectedIdx;
       if (idx === null) return;
       var row = selection.rows[idx] || {};
-      openInlineForm(a, row, btn);
+      openInlineForm(a, [row], btn);
+      return;
+    }
+    if (mode === "form" && sel === "multi") {
+      var picked = [];
+      selection.multiIdx.forEach(function (i) {
+        var r = selection.rows[i];
+        if (r) picked.push(r);
+      });
+      if (!picked.length) return;
+      openInlineForm(a, picked, btn);
       return;
     }
     if (mode === "prompt") {
@@ -723,118 +733,326 @@
   // operators don't accidentally edit immutable identifiers.
   var SYSTEM_FIELDS = ["Id", "id", "_id", "createdAt", "updatedAt", "CreatedAt", "UpdatedAt", "createdDate", "lastModifiedDate"];
 
-  function openInlineForm(action, row, originBtn) {
-    // Snapshot existing values, hide system fields, expose editables.
-    var passthroughEntries = [];
-    var editableKeys = [];
-    Object.keys(row || {}).forEach(function (k) {
-      if (SYSTEM_FIELDS.indexOf(k) !== -1) {
-        passthroughEntries.push([k, row[k]]);
-        return;
-      }
-      editableKeys.push(k);
+  // openInlineForm renders an editable form per row. Single-row mode
+  // (the `select: "single"` action) opens with one page; multi-row mode
+  // (`select: "multi"`) shows Prev/Next chrome to page through the
+  // selected rows. Per-row edits are auto-staged on navigation.
+  //
+  // On Save the bundle builds a chat-prompt diff (only changed fields
+  // per row) and posts it via SEP-1865 `ui/message` — the same path the
+  // Delete action uses — so the agent stays in the loop and re-issues
+  // the upstream `tools/call` itself with whatever shape the upstream
+  // expects. The iframe never calls the tool directly: that historically
+  // produced upstream errors like "Cannot invoke List.size() because
+  // 'objects' is null" when the bundle's flat-row payload didn't match
+  // the upstream's wrapper shape.
+  function openInlineForm(action, rows, originBtn) {
+    if (!Array.isArray(rows) || !rows.length) return;
+    var multi = rows.length > 1;
+
+    // Compute editable keys per row from the union of non-system keys.
+    function classifyKeys(row) {
+      var passthrough = [];
+      var editable = [];
+      Object.keys(row || {}).forEach(function (k) {
+        if (SYSTEM_FIELDS.indexOf(k) !== -1) {
+          passthrough.push([k, row[k]]);
+          return;
+        }
+        editable.push(k);
+      });
+      return { passthrough: passthrough, editable: editable };
+    }
+
+    // Per-row staged state. `original` snapshots input values so we can
+    // diff only changed fields when emitting the chat prompt.
+    var pages = rows.map(function (r) {
+      var c = classifyKeys(r);
+      var original = {};
+      c.editable.forEach(function (k) { original[k] = r[k]; });
+      return {
+        row: r,
+        passthrough: c.passthrough,
+        editableKeys: c.editable,
+        original: original,
+        edits: {}
+      };
     });
+
+    var current = 0;
 
     var overlay = document.createElement("div");
     overlay.className = "form-overlay";
     var card = document.createElement("div");
     card.className = "form-card";
-    var h = document.createElement("h3");
-    h.textContent = action.label || action.tool || "Edit";
-    card.appendChild(h);
 
-    var inputs = {};
-    editableKeys.forEach(function (k) {
-      var rowEl = document.createElement("div");
-      rowEl.className = "form-row";
-      var label = document.createElement("label");
-      label.textContent = k;
-      rowEl.appendChild(label);
-      var v = row[k];
-      var input;
-      if (typeof v === "object" && v !== null) {
-        input = document.createElement("textarea");
-        try { input.value = JSON.stringify(v, null, 2); }
-        catch (_) { input.value = String(v); }
-        input.setAttribute("data-type", "json");
-      } else if (typeof v === "boolean") {
-        input = document.createElement("input");
-        input.type = "checkbox";
-        input.checked = !!v;
-        input.setAttribute("data-type", "boolean");
-      } else if (typeof v === "number") {
-        input = document.createElement("input");
-        input.type = "number";
-        input.value = String(v);
-        input.setAttribute("data-type", "number");
-      } else {
-        input = document.createElement("input");
-        input.type = "text";
-        input.value = v == null ? "" : String(v);
-        input.setAttribute("data-type", "string");
-      }
-      rowEl.appendChild(input);
-      inputs[k] = input;
-      card.appendChild(rowEl);
-    });
+    var header = document.createElement("div");
+    header.style.display = "flex";
+    header.style.alignItems = "center";
+    header.style.justifyContent = "space-between";
+    header.style.marginBottom = "8px";
+
+    var h = document.createElement("h3");
+    h.style.margin = "0";
+    header.appendChild(h);
+
+    var nav = document.createElement("div");
+    nav.style.display = multi ? "flex" : "none";
+    nav.style.alignItems = "center";
+    nav.style.gap = "6px";
+    var prev = document.createElement("button");
+    prev.type = "button";
+    prev.setAttribute("aria-label", "Previous row");
+    prev.textContent = "‹";
+    prev.style.padding = "2px 10px";
+    var counter = document.createElement("span");
+    counter.style.fontSize = "12px";
+    counter.style.color = "var(--muted)";
+    var next = document.createElement("button");
+    next.type = "button";
+    next.setAttribute("aria-label", "Next row");
+    next.textContent = "›";
+    next.style.padding = "2px 10px";
+    nav.appendChild(prev);
+    nav.appendChild(counter);
+    nav.appendChild(next);
+    header.appendChild(nav);
+
+    card.appendChild(header);
+
+    var body = document.createElement("div");
+    card.appendChild(body);
 
     var formActions = document.createElement("div");
     formActions.className = "form-actions";
     var cancel = document.createElement("button");
     cancel.textContent = "Cancel";
-    cancel.addEventListener("click", function () { document.body.removeChild(overlay); });
+    cancel.addEventListener("click", function () {
+      if (overlay.parentNode) document.body.removeChild(overlay);
+      emitSize();
+    });
     var submit = document.createElement("button");
     submit.classList.add("primary");
-    submit.textContent = action.label || "Save";
-    submit.addEventListener("click", function () {
-      // Reconstruct the row with edits, then build args. If the action
-      // ships an `argsTemplate`, render it against the edited row;
-      // otherwise pass the merged row directly.
-      var edited = {};
-      passthroughEntries.forEach(function (p) { edited[p[0]] = p[1]; });
-      Object.keys(inputs).forEach(function (k) {
-        var inp = inputs[k];
-        var t = inp.getAttribute("data-type");
-        if (t === "boolean") edited[k] = !!inp.checked;
-        else if (t === "number") {
-          var n = Number(inp.value);
-          edited[k] = isNaN(n) ? inp.value : n;
-        }
-        else if (t === "json") {
-          try { edited[k] = JSON.parse(inp.value); }
-          catch (_) { edited[k] = inp.value; }
-        }
-        else edited[k] = inp.value;
+    submit.textContent = multi ? "Save all" : (action.label || "Save");
+    formActions.appendChild(cancel);
+    formActions.appendChild(submit);
+    card.appendChild(formActions);
+
+    // Active inputs for the currently rendered page; commit() writes
+    // them back to `pages[current].edits` before navigation/submit.
+    var activeInputs = {};
+
+    function readInput(inp) {
+      var t = inp.getAttribute("data-type");
+      if (t === "boolean") return !!inp.checked;
+      if (t === "number") {
+        var n = Number(inp.value);
+        return isNaN(n) ? inp.value : n;
+      }
+      if (t === "json") {
+        try { return JSON.parse(inp.value); }
+        catch (_) { return inp.value; }
+      }
+      return inp.value;
+    }
+
+    function commit() {
+      var page = pages[current];
+      if (!page) return;
+      Object.keys(activeInputs).forEach(function (k) {
+        page.edits[k] = readInput(activeInputs[k]);
       });
+    }
+
+    function renderPage(idx) {
+      current = idx;
+      activeInputs = {};
+      while (body.firstChild) body.removeChild(body.firstChild);
+
+      var page = pages[idx];
+      var label = action.label || action.tool || "Edit";
+      if (multi) {
+        var rowLabel = page.row && (page.row.Name || page.row.name || page.row.Id || page.row.id);
+        h.textContent = label + (rowLabel ? " — " + rowLabel : "");
+        counter.textContent = "Row " + (idx + 1) + " of " + pages.length;
+        prev.disabled = idx === 0;
+        next.disabled = idx === pages.length - 1;
+      } else {
+        h.textContent = label;
+      }
+
+      page.editableKeys.forEach(function (k) {
+        var rowEl = document.createElement("div");
+        rowEl.className = "form-row";
+        var lab = document.createElement("label");
+        lab.textContent = k;
+        rowEl.appendChild(lab);
+        // Show staged edits if any, else the original value.
+        var v = Object.prototype.hasOwnProperty.call(page.edits, k)
+          ? page.edits[k]
+          : page.original[k];
+        var input;
+        if (typeof v === "object" && v !== null) {
+          input = document.createElement("textarea");
+          try { input.value = JSON.stringify(v, null, 2); }
+          catch (_) { input.value = String(v); }
+          input.setAttribute("data-type", "json");
+        } else if (typeof v === "boolean") {
+          input = document.createElement("input");
+          input.type = "checkbox";
+          input.checked = !!v;
+          input.setAttribute("data-type", "boolean");
+        } else if (typeof v === "number") {
+          input = document.createElement("input");
+          input.type = "number";
+          input.value = String(v);
+          input.setAttribute("data-type", "number");
+        } else {
+          input = document.createElement("input");
+          input.type = "text";
+          input.value = v == null ? "" : String(v);
+          input.setAttribute("data-type", "string");
+        }
+        rowEl.appendChild(input);
+        activeInputs[k] = input;
+        body.appendChild(rowEl);
+      });
+      emitSize();
+    }
+
+    prev.addEventListener("click", function () {
+      if (current === 0) return;
+      commit();
+      renderPage(current - 1);
+    });
+    next.addEventListener("click", function () {
+      if (current >= pages.length - 1) return;
+      commit();
+      renderPage(current + 1);
+    });
+
+    submit.addEventListener("click", function () {
+      commit();
+      submit.disabled = true;
+      cancel.disabled = true;
+      if (multi) {
+        // Multi-row: emit a chat-prompt diff (same flow as Delete) so
+        // the agent re-decides the upstream tool call. Closes the
+        // overlay and shows the prompt panel under the table.
+        var prompt = buildEditDiffPrompt(action, pages);
+        if (overlay.parentNode) document.body.removeChild(overlay);
+        showPromptPanel(prompt);
+        emitSize();
+        return;
+      }
+      // Single-row: keep direct tools/call shape (back-compat with
+      // existing single-row form configs).
+      var page = pages[0];
+      var edited = {};
+      page.passthrough.forEach(function (p) { edited[p[0]] = p[1]; });
+      Object.keys(page.original).forEach(function (k) { edited[k] = page.original[k]; });
+      Object.keys(page.edits).forEach(function (k) { edited[k] = page.edits[k]; });
       var args;
       if (action.argsTemplate) {
-        // Make `${row}` resolve to the whole edited row, while still
-        // letting field-level placeholders (`${Id}`, `${Name}`, …)
-        // pull individual values. We layer `row` on top of `edited`
-        // so a literal column named `row` is shadowed (rare).
         var ctx = {};
         Object.keys(edited).forEach(function (k) { ctx[k] = edited[k]; });
         ctx.row = edited;
         args = substituteValue(action.argsTemplate, ctx);
+      } else if (typeof action.prompt === "string") {
+        // Single-row form with a prompt template configured: fall back
+        // to chat-mode submit (avoids upstream-shape mismatches like
+        // CRM's `objects: [...]` wrapper).
+        var prompt2 = buildEditDiffPrompt(action, pages);
+        if (overlay.parentNode) document.body.removeChild(overlay);
+        showPromptPanel(prompt2);
+        emitSize();
+        return;
       } else {
         args = edited;
       }
-      submit.disabled = true;
-      cancel.disabled = true;
       fireToolsCall(action, args, originBtn).then(function () {
         if (overlay.parentNode) document.body.removeChild(overlay);
       }).catch(function () {
-        // Leave the form open so the user can retry/edit.
         submit.disabled = false;
         cancel.disabled = false;
       });
     });
-    formActions.appendChild(cancel);
-    formActions.appendChild(submit);
-    card.appendChild(formActions);
+
     overlay.appendChild(card);
     document.body.appendChild(overlay);
-    emitSize();
+    renderPage(0);
+  }
+
+  // Builds a chat-prompt summarising the staged edits across pages.
+  // Uses `action.prompt` as a template if provided (with `${edits}`
+  // and `${rows[].Field}` placeholders), else emits a default diff.
+  // Only changed fields appear in the per-row block — values that
+  // match the original snapshot are skipped.
+  function buildEditDiffPrompt(action, pages) {
+    var changed = pages.map(function (p) {
+      var diff = [];
+      Object.keys(p.edits).forEach(function (k) {
+        var before = p.original[k];
+        var after = p.edits[k];
+        if (deepEqual(before, after)) return;
+        diff.push({ field: k, before: before, after: after });
+      });
+      return { row: p.row, diff: diff };
+    }).filter(function (e) { return e.diff.length > 0; });
+
+    if (typeof action.prompt === "string") {
+      return action.prompt
+        .replace(/\$\{edits\}/g, formatEditsBlock(changed))
+        .replace(/\$\{([^}]+)\}/g, function (m, key) {
+          var proj = /^rows\[\]\.(.+)$/.exec(key);
+          if (proj) {
+            return changed.map(function (c) {
+              return c.row ? String(c.row[proj[1]]) : "";
+            }).join(", ");
+          }
+          return m;
+        });
+    }
+    var label = action.label || action.tool || "update";
+    if (!changed.length) {
+      return "I reviewed " + pages.length + " " +
+        (pages.length === 1 ? "row" : "rows") +
+        " for " + label + " but didn't change any fields. No action needed.";
+    }
+    return "Please " + label.toLowerCase() + " the following " +
+      (changed.length === 1 ? "record" : "records") + ":\n" +
+      formatEditsBlock(changed) +
+      "\nConfirm with me first.";
+  }
+
+  function formatEditsBlock(changed) {
+    return changed.map(function (c) {
+      var idLabel = c.row && (c.row.Id || c.row.id || c.row.Name || c.row.name) || "(unknown)";
+      var sets = c.diff.map(function (d) {
+        return d.field + ": " + formatPromptValue(d.before) +
+          " → " + formatPromptValue(d.after);
+      });
+      return "- " + idLabel + " — " + sets.join("; ");
+    }).join("\n");
+  }
+
+  function formatPromptValue(v) {
+    if (v === null) return "null";
+    if (typeof v === "undefined") return "(unset)";
+    if (typeof v === "object") {
+      try { return JSON.stringify(v); } catch (_) { return String(v); }
+    }
+    if (typeof v === "string") return JSON.stringify(v);
+    return String(v);
+  }
+
+  function deepEqual(a, b) {
+    if (a === b) return true;
+    if (a == null || b == null) return false;
+    if (typeof a !== typeof b) return false;
+    if (typeof a !== "object") return false;
+    try { return JSON.stringify(a) === JSON.stringify(b); }
+    catch (_) { return false; }
   }
 
   // -------------------- pre-call form --------------------

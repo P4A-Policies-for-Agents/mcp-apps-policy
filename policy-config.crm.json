@@ -20,8 +20,9 @@
         {
           "tool": "update_accounts",
           "label": "Edit",
-          "select": "single",
-          "mode": "form"
+          "select": "multi",
+          "mode": "form",
+          "prompt": "Please update the following accounts:\n${edits}\nConfirm with me first."
         },
         {
           "tool": "delete_accounts",

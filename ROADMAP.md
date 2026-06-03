@@ -128,6 +128,25 @@ bundle so the policy works without external hosting.
   `postMessage` `targetOrigin` to it. Pre-0.1.11 we sent every
   message with `targetOrigin: "*"`, which MCP Inspector's strict
   cross-origin isolation could drop.
+- **Multi-row Edit form with chat-mode submit (0.1.25).** `mode:
+  "form"` now supports `select: "multi"`. The inline form opens
+  with Prev / Next chrome and a `Row n of N` indicator; per-row
+  edits are auto-staged on navigation (no per-row Save button) so
+  paging is fluid. On final **Save all** the bundle builds a
+  prompt diff (only the *changed* fields per row, with `before →
+  after`) and posts it via SEP-1865 `ui/message` — the same chat
+  path Delete uses. Same shape works for `select: "single"` with a
+  configured `prompt` template, sidestepping a class of upstream
+  errors where the inline form's flat-row payload didn't match the
+  upstream tool's wrapper shape (e.g. CRM `update_accounts`'s
+  `objects: [...]` envelope produced *"Cannot invoke
+  java.util.List.size() because 'objects' is null"*). With
+  prompt-mode submit the agent re-issues the upstream call with
+  whatever shape it expects, and the user sees the change request
+  in chat first. CRM's `update_accounts` Edit ships as `select:
+  "multi"` by default — both Edit and Delete now share a single
+  checkbox column on the table (the dual radio + checkbox columns
+  from 0.1.24 only appear when actions disagree on selection mode).
 - **Edit button no longer stuck disabled when single + multi actions
   coexist (0.1.24).** Bug fix in `src/bundle/auto.html`'s table
   renderer. Pre-0.1.24, the column-header and row-cell logic used
