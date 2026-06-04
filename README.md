@@ -126,17 +126,48 @@ hosts is on the roadmap.
 
 ## Table of contents
 
-1. [Why](#why)
-2. [How it works](#how-it-works)
-3. [Configuration reference](#configuration-reference)
-4. [The embedded UI bundle](#the-embedded-ui-bundle)
-5. [Custom bundles](#custom-bundles)
-6. [Local development](#local-development)
-7. [Deploying to Anypoint](#deploying-to-anypoint)
-8. [Observability](#observability)
-9. [Limits and known gaps](#limits-and-known-gaps)
-10. [Troubleshooting](#troubleshooting)
-11. [Project layout](#project-layout)
+1. [Glossary](#glossary)
+2. [Why](#why)
+3. [How it works](#how-it-works)
+4. [User guide](#user-guide)
+5. [Configuration reference](#configuration-reference)
+6. [The embedded UI bundle](#the-embedded-ui-bundle)
+7. [Custom bundles](#custom-bundles)
+8. [Local development](#local-development)
+9. [Deploying to Anypoint](#deploying-to-anypoint)
+10. [Observability](#observability)
+11. [Limits and known gaps](#limits-and-known-gaps)
+12. [Troubleshooting](#troubleshooting)
+13. [Project layout](#project-layout)
+
+---
+
+## Glossary
+
+| Term | Meaning |
+| --- | --- |
+| **MCP** | Model Context Protocol — a JSON-RPC 2.0 contract for letting agents call tools, list resources, and stream results. See <https://modelcontextprotocol.io>. |
+| **MCP server** | The upstream that implements the MCP contract (your CRM/ERP/user-accounts service, etc.). |
+| **MCP host / client** | The agent app that consumes MCP — Claude.ai, Goose, MCP Inspector, VS Code Copilot, ChatGPT, MCPJam, Postman, Archestra. |
+| **MCP Apps (SEP-1865)** | Extension that lets a tool ship an HTML bundle so the host renders the result as an interactive iframe instead of raw JSON. Spec: <https://modelcontextprotocol.io/extensions/apps/overview>. |
+| **Flex Gateway / Omni Gateway** | MuleSoft's WASM-based API gateway. This policy is a custom Flex Gateway policy. |
+| **PDK** | The MuleSoft Policy Development Kit (Rust → `wasm32-wasip1`). |
+| **Policy** | A WASM module Flex Gateway runs on each request/response. This repo *is* one. |
+| **JSON-RPC envelope** | The `{jsonrpc, id, method, params, result, error}` shape MCP rides on. The policy only acts when it sees this envelope. |
+| **`tools/list`** | MCP method that enumerates available tools. The policy annotates each entry with `_meta.ui.resourceUri`. |
+| **`tools/call`** | MCP method that invokes a tool. The policy reshapes the result with `structuredContent` + `_meta.ui.actions`. |
+| **`resources/list` / `resources/read`** | MCP methods for static resources. The policy adds a `ui://` entry per appified tool to `resources/list`, and short-circuits `resources/read` for those URIs to serve the embedded bundle. |
+| **`_meta.ui` / `_meta["io.modelcontextprotocol/ui"]`** | The MCP Apps metadata block on a tool. The spec-namespaced key is what strict hosts (Claude.ai) read; the relaxed alias (`_meta.ui`) is what older Inspector / Goose builds read. The policy emits both. |
+| **`ui://` URI** | Synthesised resource URI like `ui://mcp-apps-policy/v0.1.30/<tool>` that points at the embedded bundle. The `v<version>` segment busts the host's bundle cache on every release. |
+| **Embedded bundle** | The ~10 KB self-contained HTML/JS app the policy serves for `ui://` URIs. Implements the SEP-1865 postMessage handshake and renders results. |
+| **Renderer** | The layout the bundle picks: `auto` (shape-driven), `json`, `table`, `card`, `form`, or a `customBundles[]` name. |
+| **Action** | A button injected into a tool result's `_meta.ui.actions[]`. Clicking it can call another tool (`mode: call`), open an inline edit form (`mode: form`), or send a chat prompt back to the agent (`mode: prompt`). |
+| **Pre-call form (`formTools[]`)** | A confirmation form rendered *before* the upstream runs. The agent's `tools/call` is intercepted and replaced with a synthetic result; the user reviews/edits/augments and submits via chat. |
+| **CSP** | Content-Security-Policy allowlists carried in `_meta.ui.csp`. Required by ChatGPT's app validator; ignored by Claude.ai. |
+| **Domain** | Stable per-template origin in `_meta.ui.domain`. Required by ChatGPT; the policy synthesises `<tool>.mcp-apps-policy.local` when not set. |
+| **Streamable HTTP / SSE** | MCP's chunked-response transport (`text/event-stream`). The policy transforms each frame independently. |
+| **Anypoint** | MuleSoft's API management platform. Policies are published to Exchange and applied to API instances via `anypoint-cli-v4`. |
+| **Upstream id** | The id of the upstream service inside an Anypoint API instance. The policy applies on the upstream (response path), not the inbound. |
 
 ---
 
@@ -200,6 +231,346 @@ Two-phase pipeline (constraint of the PDK):
 
 The policy only modifies *responses* (and the synthesised
 `resources/read` short-circuit). It never touches the request body.
+
+---
+
+## User guide
+
+This section walks through the policy from an operator's point of
+view: what each config field does, when to set it, and what the
+resulting tool looks like in a host. Every example is a complete,
+copy-pasteable JSON config — drop one into a file and pass it as
+`--configFile` to `anypoint-cli-v4 api-mgr policy edit/apply`.
+
+### 1. The minimum useful config
+
+Just turn the policy on. Every tool the upstream advertises will be
+appified with the auto renderer and no actions.
+
+```json
+{
+  "appifyTools": true,
+  "appifyResponses": true,
+  "appifyActions": false,
+  "renderer": "auto",
+  "csp": { "connectDomains": [], "resourceDomains": [], "frameDomains": [], "baseUriDomains": [] },
+  "domain": "",
+  "tools": [],
+  "defaultActions": [],
+  "denyTools": [],
+  "formTools": [],
+  "customBundles": [],
+  "previewMode": false,
+  "debugHeaders": false,
+  "maxBodyBytes": 1048576
+}
+```
+
+What you get:
+
+- `tools/list` — every tool gets `_meta["io.modelcontextprotocol/ui"].resourceUri` plus the `_meta.ui` alias.
+- `resources/list` — one `ui://mcp-apps-policy/v<version>/<tool>` entry per tool.
+- `resources/read ui://...` — returns the embedded HTML bundle.
+- `tools/call` — result is shaped with `structuredContent` so the iframe can render.
+- No buttons (because `appifyActions: false` and no `tools[]`).
+
+### 2. Field-by-field guide
+
+#### Master switches
+
+| Field | When to flip it |
+| --- | --- |
+| `appifyTools` | Default on. Set `false` if you want the policy installed but invisible to discovery — e.g. troubleshooting, or while you stage a config in production without changing host behaviour. |
+| `appifyResponses` | Default on. Turning this off means tool results keep their original shape; iframes will see no `structuredContent` and most renderers will fall back to `json`. Useful only as a kill-switch. |
+| `appifyActions` | Default on. Turn it off (or scope via `tools[].actions`) when you're not yet ready to surface buttons. The bundle still renders the result, just without the action row. |
+
+```json
+{ "appifyTools": true, "appifyResponses": true, "appifyActions": true }
+```
+
+#### `renderer` — global default layout
+
+Picks the layout the embedded bundle uses when a tool doesn't
+override it. Most operators leave this at `auto`.
+
+| Value | Picks | Use when |
+| --- | --- | --- |
+| `auto` | Shape-driven (table for arrays, card for flat objects, json otherwise) | Default; safe across diverse tools |
+| `table` | Tabular grid | Tools that always return list-of-rows |
+| `card` | Key/value grid | Tools that always return a flat record |
+| `form` | Editable form | Tools you want users to edit (pair with an action) |
+| `json` | Pretty-printed JSON | When you don't trust the upstream shape |
+
+```json
+{ "renderer": "auto" }
+```
+
+Override per tool via `tools[].renderer`.
+
+#### `csp` — Content-Security-Policy allowlists
+
+Emitted as `_meta.ui.csp`. Claude.ai ignores this. **ChatGPT's
+app-submission validator rejects templates without a CSP block** —
+empty arrays satisfy it.
+
+```json
+{
+  "csp": {
+    "connectDomains": ["api.salesforce.com"],
+    "resourceDomains": ["cdn.salesforce.com"],
+    "frameDomains": [],
+    "baseUriDomains": []
+  }
+}
+```
+
+- `connectDomains` — domains the iframe may `fetch()` / WebSocket to.
+- `resourceDomains` — domains the iframe may load images/fonts/scripts from.
+- `frameDomains` — domains the iframe may itself embed via `<iframe>`.
+- `baseUriDomains` — allowed `<base href>` targets.
+
+Leave them empty (the default) if you don't host external assets
+inside the bundle.
+
+#### `domain` — stable origin per template
+
+Emitted as `_meta.ui.domain`. Required by ChatGPT (one unique
+domain per template). When omitted, the policy synthesises
+`<toolName>.mcp-apps-policy.local` per tool, which already passes
+ChatGPT's validator. Override per-tool when you want a real,
+auditable origin:
+
+```json
+{ "tools": [{ "name": "get_inventory", "domain": "inventory.example.com" }] }
+```
+
+#### `tools[]` — per-tool overrides
+
+The most-used field. Each entry is keyed by `name` (the upstream
+tool name) and may carry: `appify`, `renderer`, `domain`, `csp`,
+`actions[]`, `formMode`, `formFields[]`. Tools you don't list
+inherit the global defaults.
+
+```json
+{
+  "tools": [
+    { "name": "get_accounts", "renderer": "table",
+      "actions": [
+        { "tool": "create_Accounts", "label": "Create" },
+        { "tool": "update_accounts", "label": "Edit",
+          "select": "single", "mode": "prompt",
+          "prompt": "Please update account ${Id} (${Name}). What do you want to change?" },
+        { "tool": "delete_accounts", "label": "Delete",
+          "select": "multi", "mode": "prompt",
+          "prompt": "Please delete accounts ${rows[].Name} (Ids: ${rows[].Id}). Confirm first." }
+      ]
+    },
+    { "name": "internal_debug", "appify": false }
+  ]
+}
+```
+
+#### `actions[]` — buttons in the iframe
+
+Each action becomes a button in the result iframe.
+
+| Field | Purpose |
+| --- | --- |
+| `tool` | The MCP tool name to invoke (or referenced in the prompt). |
+| `label` | The button caption. |
+| `select` | `none` (default), `single` (radio column), `multi` (checkbox column). Controls whether the user must pick a row first. |
+| `mode` | `call` (default — fire `tools/call` directly), `form` (open inline editor for the picked row), `prompt` (post a chat message to the agent via `ui/message` instead of calling). |
+| `prompt` | Template used by `mode: prompt`. Supports `${field}`, `${row}`, `${rows}`, `${rows[].Field}`. |
+| `argsTemplate` | JSON template for `mode: call`. Same substitution rules. |
+
+**Pick `mode: prompt` for destructive actions.** It keeps the
+agent in the conversation chain so the user sees what's happening
+in chat instead of an iframe firing a silent `tools/call`.
+
+#### `defaultActions[]` — applied to every tool
+
+Same shape as `actions[]`, applied on top of any per-tool list.
+Useful for cross-cutting buttons (e.g. *Refresh*, *Help*).
+
+```json
+{ "defaultActions": [{ "tool": "refresh_view", "label": "Refresh" }] }
+```
+
+#### `denyTools[]` — never appify these
+
+Wins over everything else. Tools listed here are never advertised
+as apps, never get a `ui://` resource, and never appear as the
+target of an action.
+
+```json
+{ "denyTools": ["health", "metrics", "internal_debug"] }
+```
+
+#### `formTools[]` — pre-call confirmation form
+
+Lists tools that should *not* run immediately when the agent calls
+them. Instead the policy short-circuits the call, returns a
+synthetic result that renders as a form, and only forwards the
+real call upstream once the user submits via chat.
+
+```json
+{
+  "formTools": ["submit_order", "delete_accounts"],
+  "tools": [
+    {
+      "name": "submit_order",
+      "formFields": [
+        { "name": "deliveryNotes", "label": "Delivery notes", "type": "string", "placeholder": "(optional)" },
+        { "name": "expedite", "label": "Expedite shipping", "type": "boolean" }
+      ]
+    }
+  ]
+}
+```
+
+Set `tools[].formMode: "skip"` per-tool to bypass the form when an
+earlier `prompt`-mode action already gathered consent.
+
+#### `customBundles[]` — your own HTML
+
+Embed a fully custom HTML5 document and reference it by name from
+`tools[].renderer`.
+
+```json
+{
+  "customBundles": [
+    {
+      "name": "inventory-card",
+      "html": "<!DOCTYPE html><html>...</html>",
+      "csp": { "connectDomains": ["api.example.com"], "resourceDomains": [] }
+    }
+  ],
+  "tools": [{ "name": "get_inventory", "renderer": "inventory-card" }]
+}
+```
+
+#### `previewMode` / `debugHeaders` / `maxBodyBytes`
+
+| Field | Use |
+| --- | --- |
+| `previewMode` | `true` during rollout. Adds `x-mcp-apps-preview` headers and the in-iframe debug overlay (`<meta name="x-mcp-debug">`). Off in production. |
+| `debugHeaders` | `true` while debugging a single request. Adds `x-mcp-apps-method`, `x-mcp-apps-tool`, `x-mcp-apps-action`, `x-mcp-apps-renderer`. Off in production. |
+| `maxBodyBytes` | Default 1 MiB. Bodies above this pass through untouched. Increase up to 50 MiB only if you control the upstream and need it. |
+
+### 3. Worked example — accounts (read + write + delete)
+
+A CRM-style upstream with `get_accounts`, `create_Accounts`,
+`update_accounts`, `delete_accounts`. The user wants to see
+accounts in a table, edit one in chat (single-select prompt), and
+delete several at once after confirming in chat
+(multi-select prompt). `delete_accounts` also gets a pre-call
+form to surface a "Reason" field the agent often forgets.
+
+```json
+{
+  "appifyTools": true,
+  "appifyResponses": true,
+  "appifyActions": true,
+  "renderer": "auto",
+  "csp": { "connectDomains": [], "resourceDomains": [], "frameDomains": [], "baseUriDomains": [] },
+  "domain": "",
+  "tools": [
+    {
+      "name": "get_accounts",
+      "renderer": "table",
+      "actions": [
+        { "tool": "create_Accounts", "label": "Create" },
+        { "tool": "update_accounts", "label": "Edit",
+          "select": "single", "mode": "prompt",
+          "prompt": "Please update account ${Id} (${Name}). What change should I make?" },
+        { "tool": "delete_accounts", "label": "Delete",
+          "select": "multi", "mode": "prompt",
+          "prompt": "Please delete accounts ${rows[].Name} (Ids: ${rows[].Id}). Confirm with me first." }
+      ]
+    },
+    {
+      "name": "delete_accounts",
+      "formFields": [
+        { "name": "reason", "label": "Reason", "type": "string", "required": true }
+      ]
+    }
+  ],
+  "formTools": ["delete_accounts"],
+  "defaultActions": [],
+  "denyTools": [],
+  "customBundles": [],
+  "previewMode": false,
+  "debugHeaders": false,
+  "maxBodyBytes": 1048576
+}
+```
+
+### 4. Worked example — user-accounts (registration with login follow-up)
+
+The `registerAccount` tool returns a confirmation card. After
+registration the user usually wants to log in, but you don't want
+the iframe to silently call `login`; instead post a chat prompt
+to the agent so the conversation chain stays visible.
+
+```json
+{
+  "appifyTools": true,
+  "appifyResponses": true,
+  "appifyActions": true,
+  "renderer": "auto",
+  "csp": { "connectDomains": [], "resourceDomains": [], "frameDomains": [], "baseUriDomains": [] },
+  "domain": "",
+  "tools": [
+    {
+      "name": "registerAccount",
+      "appify": true,
+      "actions": [
+        {
+          "tool": "login",
+          "label": "Login to Account",
+          "select": "none",
+          "mode": "prompt",
+          "prompt": "Please login using ${email} with the password I just provided."
+        }
+      ]
+    }
+  ],
+  "defaultActions": [],
+  "formTools": [],
+  "denyTools": [],
+  "customBundles": [],
+  "previewMode": false,
+  "debugHeaders": false,
+  "maxBodyBytes": 1048576
+}
+```
+
+### 5. Rollout playbook
+
+1. **Apply the minimum config (section 1).** Verify with `curl` that
+   `tools/list` carries `_meta["io.modelcontextprotocol/ui"]` and
+   `resources/read ui://...` returns HTML.
+2. **Add a connector in your host** (Claude.ai, Goose, Inspector).
+   Confirm tools appear and a tool result renders in the iframe.
+3. **Layer per-tool overrides** in `tools[]`. Start with one tool's
+   `renderer` and one safe `actions[]` entry.
+4. **Add `prompt`-mode actions** for destructive operations.
+5. **Add `formTools[]`** for tools where you want the user to
+   confirm/augment arguments before the upstream runs.
+6. **Turn on `previewMode`** while watching the rollout, then turn
+   it off. Leave `debugHeaders` off in production.
+
+### 6. Known host quirks
+
+See [Troubleshooting](#troubleshooting) for the full table. Two to
+keep in mind up front:
+
+- **Claude.ai's MCP-App client pool can return `client_not_found`
+  transiently** even when the wire is correct. If a fresh chat and a
+  re-add don't fix it, wait several hours — observed self-healing
+  next-morning with no policy/config changes.
+- **ChatGPT does not speak SEP-1865 yet.** It needs the proprietary
+  OpenAI Apps SDK shape; on the roadmap, not in 0.1.x.
 
 ---
 
@@ -650,6 +1021,7 @@ during rollout.
 | `resources/read` for a `ui://` URI hits the upstream | Policy load order / wrong policy ref | Check `anypoint-cli-v4 api-mgr policy list` shows `mcp-apps-policy` applied. |
 | `Cannot process message because this session hasn't been initialized yet` | Upstream uses Streamable HTTP and requires an `initialize` handshake first | Issue an MCP `initialize`, capture the `mcp-session-id` response header, send it on subsequent calls. |
 | Custom bundle ignored | Bundle `name` collides with a built-in renderer (`auto`/`json`/`table`/`card`/`form`) | Rename the bundle. |
+| Claude.ai shows tools but never renders the iframe; HAR contains `claudeai.mcp_app.client_not_found` and **zero** outbound calls to the gateway | Claude.ai's internal MCP-App client pool (keyed by `server_uuid`) is in a stale half-registered state. The wire is correct (verify with direct `curl` against `<gateway>/mcp` — `tools/list` carries `_meta["io.modelcontextprotocol/ui"]`, `resources/read ui://…` returns HTML, and the completion request marks every tool with `is_mcp_app: true`). | **Wait.** Observed in 0.1.30 against the user-accounts MCP: a fresh chat, no mobile emulation, and a full delete + re-add of the connector did not help. The same connector started rendering correctly on its own the next morning with no policy or config change. If `register/delete + fresh chat` doesn't recover within ~24 h, file the HAR (with the `client_not_found` event and the `server_uuid`) with Anthropic — the failure is inside Claude's client and only Anthropic can fix it. Goose is unaffected because it uses a per-session client and doesn't pool. |
 
 ---
 
