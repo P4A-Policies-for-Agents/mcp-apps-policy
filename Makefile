@@ -84,6 +84,22 @@ build-asset-files: $(DEFINITION_SRC_GCL_PATH)
 		cp definition/target/definition/schema.json   definition/target/schema.json   2>/dev/null || true; \
 	fi
 	@cargo anypoint config-gen -p -m $(DEFINITION_SRC_GCL_PATH) -o src/generated/config.rs
+	@# cargo-anypoint 1.8.0 names nested object structs with a per-scope
+	@# counter, so `tools[].csp` and `customBundles[].csp` both emit as
+	@# `Csp1Config`. Prettify passes but `cargo build` fails E0428
+	@# "defined multiple times" (GH #1). The colliding blocks are
+	@# byte-identical, so collapse repeats to the first definition.
+	@awk -f scripts/dedup-config-structs.awk src/generated/config.rs > src/generated/config.rs.dedup \
+		&& mv src/generated/config.rs.dedup src/generated/config.rs
+	@# Guard: fail loudly if any duplicate struct survives (e.g. a future
+	@# NON-identical collision the dedup can't safely collapse).
+	@dups=$$(grep -oE '^pub struct [A-Za-z_][A-Za-z0-9_]*' src/generated/config.rs | sort | uniq -d); \
+	if [ -n "$$dups" ]; then \
+		echo "ERROR: duplicate struct(s) in generated config after dedup:" >&2; \
+		echo "$$dups" >&2; \
+		echo "config-gen emitted colliding non-identical structs — fix definition/gcl.yaml or scripts/dedup-config-structs.awk" >&2; \
+		exit 1; \
+	fi
 
 .PHONY: login
 login:
