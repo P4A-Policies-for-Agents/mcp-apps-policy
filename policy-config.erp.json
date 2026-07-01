@@ -33,13 +33,13 @@
         {
           "name": "deliveryNotes",
           "label": "Delivery notes",
-          "type": "string",
+          "fieldType": "string",
           "placeholder": "Optional"
         },
         {
           "name": "expedite",
           "label": "Expedite shipping",
-          "type": "boolean"
+          "fieldType": "boolean"
         }
       ],
       "actions": [

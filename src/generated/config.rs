@@ -66,7 +66,7 @@ pub struct FormFields0Config {
     pub name: String,
     #[serde(alias = "label")]
     pub label: Option<String>,
-    #[serde(alias = "type")]
+    #[serde(alias = "fieldType")]
     pub field_type: Option<String>,
     #[serde(alias = "placeholder")]
     pub placeholder: Option<String>,

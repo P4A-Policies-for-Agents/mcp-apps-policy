@@ -40,13 +40,13 @@
         {
           "name": "Description",
           "label": "Description",
-          "type": "string",
+          "fieldType": "string",
           "placeholder": "Optional account description"
         },
         {
           "name": "Industry",
           "label": "Industry",
-          "type": "string",
+          "fieldType": "string",
           "placeholder": "Optional"
         }
       ]

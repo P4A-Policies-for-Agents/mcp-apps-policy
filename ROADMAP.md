@@ -223,8 +223,8 @@ bundle so the policy works without external hosting.
   <declared>}`. The embedded bundle recognises the marker and
   renders a confirmation form pre-filled with the agent's
   arguments, plus any operator-declared optional fields from
-  `tools[].formFields[]` (`name`/`label`/`type`/`placeholder`/
-  `required`, types `string`/`number`/`boolean`/`json`). Submit
+  `tools[].formFields[]` (`name`/`label`/`fieldType`/`placeholder`/
+  `required`, widgets `string`/`number`/`boolean`/`json`). Submit
   re-issues `tools/call` with the merged arguments plus an internal
   `_mcpAppsConfirmed: true` marker; the policy strips the marker
   and forwards the confirmed call upstream. Cancel clears the
