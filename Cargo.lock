@@ -1077,7 +1077,7 @@ checksum = "616ec5685824bcc94416c6d4a7a446eea774a31efd7062c8480ba6fd06d7a6e5"
 
 [[package]]
 name = "mcp_apps_policy"
-version = "0.1.30"
+version = "0.1.31"
 dependencies = [
  "anyhow",
  "pdk",

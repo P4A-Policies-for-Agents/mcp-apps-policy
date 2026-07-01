@@ -62,12 +62,12 @@ pub struct Actions0Config {
 }
 #[derive(Deserialize, Clone, Debug)]
 pub struct FormFields0Config {
-    #[serde(alias = "name")]
-    pub name: String,
+    #[serde(alias = "fieldType")]
+    pub field_type: Option<String>,
     #[serde(alias = "label")]
     pub label: Option<String>,
-    #[serde(alias = "type")]
-    pub field_type: Option<String>,
+    #[serde(alias = "name")]
+    pub name: String,
     #[serde(alias = "placeholder")]
     pub placeholder: Option<String>,
     #[serde(alias = "required")]
@@ -110,10 +110,10 @@ pub struct Config {
     pub default_actions: Option<Vec<DefaultActions0Config>>,
     #[serde(alias = "denyTools")]
     pub deny_tools: Option<Vec<String>>,
-    #[serde(alias = "formTools")]
-    pub form_tools: Option<Vec<String>>,
     #[serde(alias = "domain")]
     pub domain: Option<String>,
+    #[serde(alias = "formTools")]
+    pub form_tools: Option<Vec<String>>,
     #[serde(alias = "maxBodyBytes")]
     pub max_body_bytes: Option<i64>,
     #[serde(alias = "previewMode")]

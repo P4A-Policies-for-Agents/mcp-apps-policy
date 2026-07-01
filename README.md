@@ -420,8 +420,8 @@ real call upstream once the user submits via chat.
     {
       "name": "submit_order",
       "formFields": [
-        { "name": "deliveryNotes", "label": "Delivery notes", "type": "string", "placeholder": "(optional)" },
-        { "name": "expedite", "label": "Expedite shipping", "type": "boolean" }
+        { "name": "deliveryNotes", "label": "Delivery notes", "fieldType": "string", "placeholder": "(optional)" },
+        { "name": "expedite", "label": "Expedite shipping", "fieldType": "boolean" }
       ]
     }
   ]
@@ -491,7 +491,7 @@ form to surface a "Reason" field the agent often forgets.
     {
       "name": "delete_accounts",
       "formFields": [
-        { "name": "reason", "label": "Reason", "type": "string", "required": true }
+        { "name": "reason", "label": "Reason", "fieldType": "string", "required": true }
       ]
     }
   ],
@@ -691,15 +691,17 @@ keep in mind up front:
   {
     "formFields": [
       { "name": "deliveryNotes", "label": "Delivery notes",
-        "type": "string", "placeholder": "(optional)" },
+        "fieldType": "string", "placeholder": "(optional)" },
       { "name": "priority", "label": "Priority",
-        "type": "number", "required": false }
+        "fieldType": "number", "required": false }
     ]
   }
   ```
 
-  `type` is one of `string` | `number` | `boolean` | `json` (default
-  `string`). `required: true` adds an asterisk and blocks submission
+  `fieldType` is one of `string` | `number` | `boolean` | `json`
+  (default `string`; named `fieldType`, not `type`, to avoid a Rust
+  keyword collision in config-gen). `required: true` adds an asterisk
+  and blocks submission
   until filled in. The bundle merges agent-supplied values with
   declared fields — the user always sees the agent's choices and
   any extras you declared, in declaration order.
@@ -752,9 +754,9 @@ Example: confirm before submitting an order.
       "name": "submit_order",
       "formFields": [
         { "name": "deliveryNotes", "label": "Delivery notes",
-          "type": "string", "placeholder": "(optional)" },
+          "fieldType": "string", "placeholder": "(optional)" },
         { "name": "expedite", "label": "Expedite shipping",
-          "type": "boolean" }
+          "fieldType": "boolean" }
       ]
     }
   ]

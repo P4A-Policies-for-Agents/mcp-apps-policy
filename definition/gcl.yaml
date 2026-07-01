@@ -278,7 +278,7 @@ spec:
                   default: ""
                   description: |
                     User-facing label. Defaults to `name` if blank.
-                type:
+                fieldType:
                   type: string
                   enum:
                     - string
@@ -290,6 +290,8 @@ spec:
                     Input widget. `string` is a single-line input,
                     `number` a numeric input, `boolean` a checkbox,
                     `json` a textarea parsed as JSON on submit.
+                    (Named `fieldType`, not `type`: `type` collides
+                    with a Rust keyword and breaks config-gen.)
                 placeholder:
                   type: string
                   default: ""
